@@ -9,12 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"strings"
 	"sync"
 	"testing"
 	"text/template/parse"
 )
 
-func TestAddParseTree(t *testing.T) {
+func TestAddParseTreeHTML(t *testing.T) {
 	root := Must(New("root").Parse(`{{define "a"}} {{.}} {{template "b"}} {{.}} "></a>{{end}}`))
 	tree, err := parse.Parse("t", `{{define "b"}}<a href="{{end}}`, "", "", nil, nil)
 	if err != nil {
@@ -260,5 +261,19 @@ func TestCloneRedefinedName(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// Issue 24791.
+func TestClonePipe(t *testing.T) {
+	a := Must(New("a").Parse(`{{define "a"}}{{range $v := .A}}{{$v}}{{end}}{{end}}`))
+	data := struct{ A []string }{A: []string{"hi"}}
+	b := Must(a.Clone())
+	var buf strings.Builder
+	if err := b.Execute(&buf, &data); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := buf.String(), "hi"; got != want {
+		t.Errorf("got %q want %q", got, want)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strings"
 )
 
 func main() {
@@ -29,7 +30,8 @@ func main() {
 
 	goarch := os.Getenv("GOARCH")
 	goos := os.Getenv("GOOS")
-	if goarch == "s390x" && goos == "linux" {
+	switch {
+	case goarch == "s390x" && goos == "linux":
 		// Export the types of PtraceRegs fields.
 		re := regexp.MustCompile("ptrace(Psw|Fpregs|Per)")
 		s = re.ReplaceAllString(s, "Ptrace$1")
@@ -38,14 +40,25 @@ func main() {
 		re = regexp.MustCompile("Pad_cgo[A-Za-z0-9_]*")
 		s = re.ReplaceAllString(s, "_")
 
+		// We want to keep X__val in Fsid. Hide it and restore it later.
+		s = strings.Replace(s, "X__val", "MKPOSTFSIDVAL", 1)
+
 		// Replace other unwanted fields with blank identifiers.
 		re = regexp.MustCompile("X_[A-Za-z0-9_]*")
 		s = re.ReplaceAllString(s, "_")
+
+		// Restore X__val in Fsid.
+		s = strings.Replace(s, "MKPOSTFSIDVAL", "X__val", 1)
 
 		// Force the type of RawSockaddr.Data to [14]int8 to match
 		// the existing gccgo API.
 		re = regexp.MustCompile("(Data\\s+\\[14\\])uint8")
 		s = re.ReplaceAllString(s, "${1}int8")
+
+	case goos == "freebsd":
+		// Keep pre-FreeBSD 10 / non-POSIX 2008 names for timespec fields
+		re := regexp.MustCompile("(A|M|C|Birth)tim\\s+Timespec")
+		s = re.ReplaceAllString(s, "${1}timespec Timespec")
 	}
 
 	// gofmt

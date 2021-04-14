@@ -48,7 +48,7 @@ func ExampleCopyBuffer() {
 func ExampleCopyN() {
 	r := strings.NewReader("some io.Reader stream to be read")
 
-	if _, err := io.CopyN(os.Stdout, r, 5); err != nil {
+	if _, err := io.CopyN(os.Stdout, r, 4); err != nil {
 		log.Fatal(err)
 	}
 
@@ -59,7 +59,7 @@ func ExampleCopyN() {
 func ExampleReadAtLeast() {
 	r := strings.NewReader("some io.Reader stream to be read\n")
 
-	buf := make([]byte, 33)
+	buf := make([]byte, 14)
 	if _, err := io.ReadAtLeast(r, buf, 4); err != nil {
 		log.Fatal(err)
 	}
@@ -78,10 +78,9 @@ func ExampleReadAtLeast() {
 	}
 
 	// Output:
-	// some io.Reader stream to be read
-	//
+	// some io.Reader
 	// error: short buffer
-	// error: EOF
+	// error: unexpected EOF
 }
 
 func ExampleReadFull() {
@@ -137,24 +136,14 @@ func ExampleMultiReader() {
 }
 
 func ExampleTeeReader() {
-	r := strings.NewReader("some io.Reader stream to be read\n")
-	var buf bytes.Buffer
-	tee := io.TeeReader(r, &buf)
+	var r io.Reader = strings.NewReader("some io.Reader stream to be read\n")
 
-	printall := func(r io.Reader) {
-		b, err := ioutil.ReadAll(r)
-		if err != nil {
-			log.Fatal(err)
-		}
+	r = io.TeeReader(r, os.Stdout)
 
-		fmt.Printf("%s", b)
-	}
-
-	printall(tee)
-	printall(&buf)
+	// Everything read from r will be copied to stdout.
+	ioutil.ReadAll(r)
 
 	// Output:
-	// some io.Reader stream to be read
 	// some io.Reader stream to be read
 }
 
@@ -172,7 +161,7 @@ func ExampleSectionReader() {
 
 func ExampleSectionReader_ReadAt() {
 	r := strings.NewReader("some io.Reader stream to be read\n")
-	s := io.NewSectionReader(r, 5, 16)
+	s := io.NewSectionReader(r, 5, 17)
 
 	buf := make([]byte, 6)
 	if _, err := s.ReadAt(buf, 10); err != nil {
@@ -187,21 +176,36 @@ func ExampleSectionReader_ReadAt() {
 
 func ExampleSectionReader_Seek() {
 	r := strings.NewReader("some io.Reader stream to be read\n")
-	s := io.NewSectionReader(r, 5, 16)
+	s := io.NewSectionReader(r, 5, 17)
 
 	if _, err := s.Seek(10, io.SeekStart); err != nil {
 		log.Fatal(err)
 	}
 
-	buf := make([]byte, 6)
-	if _, err := s.Read(buf); err != nil {
+	if _, err := io.Copy(os.Stdout, s); err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("%s\n", buf)
-
 	// Output:
 	// stream
+}
+
+func ExampleSeeker_Seek() {
+	r := strings.NewReader("some io.Reader stream to be read\n")
+
+	r.Seek(5, io.SeekStart) // move to the 5th char from the start
+	if _, err := io.Copy(os.Stdout, r); err != nil {
+		log.Fatal(err)
+	}
+
+	r.Seek(-5, io.SeekEnd)
+	if _, err := io.Copy(os.Stdout, r); err != nil {
+		log.Fatal(err)
+	}
+
+	// Output:
+	// io.Reader stream to be read
+	// read
 }
 
 func ExampleMultiWriter() {
@@ -219,5 +223,21 @@ func ExampleMultiWriter() {
 
 	// Output:
 	// some io.Reader stream to be read
+	// some io.Reader stream to be read
+}
+
+func ExamplePipe() {
+	r, w := io.Pipe()
+
+	go func() {
+		fmt.Fprint(w, "some io.Reader stream to be read\n")
+		w.Close()
+	}()
+
+	if _, err := io.Copy(os.Stdout, r); err != nil {
+		log.Fatal(err)
+	}
+
+	// Output:
 	// some io.Reader stream to be read
 }

@@ -11,11 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"internal/race"
 	"internal/testenv"
 	"io"
 	"io/ioutil"
-	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -114,41 +113,44 @@ func TestFileHeaderRoundTrip64(t *testing.T) {
 	testHeaderRoundTrip(fh, uint32max, fh.UncompressedSize64, t)
 }
 
-func TestZeroFileRoundTrip(t *testing.T) {
-	var b bytes.Buffer
-	w := NewWriter(&b)
-	if _, err := w.Create(""); err != nil {
-		t.Fatal(err)
+func TestFileHeaderRoundTripModified(t *testing.T) {
+	fh := &FileHeader{
+		Name:             "foo.txt",
+		UncompressedSize: 987654321,
+		Modified:         time.Now().Local(),
+		ModifiedTime:     1234,
+		ModifiedDate:     5678,
 	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	r, err := NewReader(bytes.NewReader(b.Bytes()), int64(b.Len()))
+	fi := fh.FileInfo()
+	fh2, err := FileInfoHeader(fi)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got, want := fh2.Modified, fh.Modified.UTC(); got != want {
+		t.Errorf("Modified: got %s, want %s\n", got, want)
+	}
+	if got, want := fi.ModTime(), fh.Modified.UTC(); got != want {
+		t.Errorf("Modified: got %s, want %s\n", got, want)
+	}
+}
 
-	// Verify that fields that should reasonably be the zero value stays
-	// as the zero value.
-	var want FileHeader
-	if len(r.File) != 1 {
-		t.Fatalf("len(r.File) = %d, want 1", len(r.File))
+func TestFileHeaderRoundTripWithoutModified(t *testing.T) {
+	fh := &FileHeader{
+		Name:             "foo.txt",
+		UncompressedSize: 987654321,
+		ModifiedTime:     1234,
+		ModifiedDate:     5678,
 	}
-	fh := r.File[0].FileHeader
-	got := FileHeader{
-		Name:               fh.Name,
-		ModifiedTime:       fh.ModifiedTime,
-		ModifiedDate:       fh.ModifiedDate,
-		UncompressedSize:   fh.UncompressedSize,
-		UncompressedSize64: fh.UncompressedSize64,
-		ExternalAttrs:      fh.ExternalAttrs,
-		Comment:            fh.Comment,
+	fi := fh.FileInfo()
+	fh2, err := FileInfoHeader(fi)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(fh.Extra) > 0 {
-		got.Extra = fh.Extra
+	if got, want := fh2.ModTime(), fh.ModTime(); got != want {
+		t.Errorf("Modified: got %s, want %s\n", got, want)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("FileHeader mismatch:\ngot  %#v\nwant %#v", got, want)
+	if got, want := fi.ModTime(), fh.ModTime(); got != want {
+		t.Errorf("Modified: got %s, want %s\n", got, want)
 	}
 }
 
@@ -179,14 +181,7 @@ func (r *rleBuffer) Write(p []byte) (n int, err error) {
 		rp = &r.buf[len(r.buf)-1]
 		// Fast path, if p is entirely the same byte repeated.
 		if lastByte := rp.b; len(p) > 0 && p[0] == lastByte {
-			all := true
-			for _, b := range p {
-				if b != lastByte {
-					all = false
-					break
-				}
-			}
-			if all {
+			if bytes.Count(p, []byte{lastByte}) == len(p) {
 				rp.n += int64(len(p))
 				return len(p), nil
 			}
@@ -204,6 +199,25 @@ func (r *rleBuffer) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+func min(x, y int64) int64 {
+	if x < y {
+		return x
+	}
+	return y
+}
+
+func memset(a []byte, b byte) {
+	if len(a) == 0 {
+		return
+	}
+	// Double, until we reach power of 2 >= len(a), same as bytes.Repeat,
+	// but without allocation.
+	a[0] = b
+	for i, l := 1, len(a); i < l; i *= 2 {
+		copy(a[i:], a[:i])
+	}
+}
+
 func (r *rleBuffer) ReadAt(p []byte, off int64) (n int, err error) {
 	if len(p) == 0 {
 		return
@@ -215,16 +229,13 @@ func (r *rleBuffer) ReadAt(p []byte, off int64) (n int, err error) {
 	parts := r.buf[skipParts:]
 	if len(parts) > 0 {
 		skipBytes := off - parts[0].off
-		for len(parts) > 0 {
-			part := parts[0]
-			for i := skipBytes; i < part.n; i++ {
-				if n == len(p) {
-					return
-				}
-				p[n] = part.b
-				n++
+		for _, part := range parts {
+			repeat := int(min(part.n-skipBytes, int64(len(p)-n)))
+			memset(p[n:n+repeat], part.b)
+			n += repeat
+			if n == len(p) {
+				return
 			}
-			parts = parts[1:]
 			skipBytes = 0
 		}
 	}
@@ -294,10 +305,10 @@ func TestZip64EdgeCase(t *testing.T) {
 	testZip64DirectoryRecordLength(buf, t)
 }
 
-// Tests that we generate a zip64 file if the the directory at offset
+// Tests that we generate a zip64 file if the directory at offset
 // 0xFFFFFFFF, but not before.
 func TestZip64DirectoryOffset(t *testing.T) {
-	if testing.Short() && race.Enabled {
+	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
 	t.Parallel()
@@ -342,7 +353,7 @@ func TestZip64DirectoryOffset(t *testing.T) {
 
 // At 16k records, we need to generate a zip64 file.
 func TestZip64ManyRecords(t *testing.T) {
-	if testing.Short() && race.Enabled {
+	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
 	t.Parallel()
@@ -491,6 +502,9 @@ func suffixIsZip64(t *testing.T, zip sizedReaderAt) bool {
 
 // Zip64 is required if the total size of the records is uint32max.
 func TestZip64LargeDirectory(t *testing.T) {
+	if runtime.GOARCH == "wasm" {
+		t.Skip("too slow on wasm")
+	}
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
@@ -684,16 +698,54 @@ func TestHeaderTooShort(t *testing.T) {
 	h := FileHeader{
 		Name:   "foo.txt",
 		Method: Deflate,
-		Extra:  []byte{zip64ExtraId}, // missing size and second half of tag, but Extra is best-effort parsing
+		Extra:  []byte{zip64ExtraID}, // missing size and second half of tag, but Extra is best-effort parsing
 	}
 	testValidHeader(&h, t)
+}
+
+func TestHeaderTooLongErr(t *testing.T) {
+	var headerTests = []struct {
+		name    string
+		extra   []byte
+		wanterr error
+	}{
+		{
+			name:    strings.Repeat("x", 1<<16),
+			extra:   []byte{},
+			wanterr: errLongName,
+		},
+		{
+			name:    "long_extra",
+			extra:   bytes.Repeat([]byte{0xff}, 1<<16),
+			wanterr: errLongExtra,
+		},
+	}
+
+	// write a zip file
+	buf := new(bytes.Buffer)
+	w := NewWriter(buf)
+
+	for _, test := range headerTests {
+		h := &FileHeader{
+			Name:  test.name,
+			Extra: test.extra,
+		}
+		_, err := w.CreateHeader(h)
+		if err != test.wanterr {
+			t.Errorf("error=%v, want %v", err, test.wanterr)
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestHeaderIgnoredSize(t *testing.T) {
 	h := FileHeader{
 		Name:   "foo.txt",
 		Method: Deflate,
-		Extra:  []byte{zip64ExtraId & 0xFF, zip64ExtraId >> 8, 24, 0, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8}, // bad size but shouldn't be consulted
+		Extra:  []byte{zip64ExtraID & 0xFF, zip64ExtraID >> 8, 24, 0, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8}, // bad size but shouldn't be consulted
 	}
 	testValidHeader(&h, t)
 }
@@ -717,6 +769,18 @@ func TestZeroLengthHeader(t *testing.T) {
 func BenchmarkZip64Test(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		testZip64(b, 1<<26)
+	}
+}
+
+func BenchmarkZip64TestSizes(b *testing.B) {
+	for _, size := range []int64{1 << 12, 1 << 20, 1 << 26} {
+		b.Run(fmt.Sprint(size), func(b *testing.B) {
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					testZip64(b, size)
+				}
+			})
+		})
 	}
 }
 

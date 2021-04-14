@@ -40,14 +40,14 @@ func normBase(path string) (string, error) {
 	return syscall.UTF16ToString(data.FileName[:]), nil
 }
 
-// baseIsDotDot returns whether the last element of path is "..".
+// baseIsDotDot reports whether the last element of path is "..".
 // The given path should be 'Clean'-ed in advance.
 func baseIsDotDot(path string) bool {
 	i := strings.LastIndexByte(path, Separator)
 	return path[i+1:] == ".."
 }
 
-// toNorm returns the normalized path that is guranteed to be unique.
+// toNorm returns the normalized path that is guaranteed to be unique.
 // It should accept the following formats:
 //   * UNC paths                              (e.g \\server\share\foo\bar)
 //   * absolute paths                         (e.g C:\foo\bar)
@@ -107,9 +107,13 @@ func toNorm(path string, normBase func(string) (string, error)) (string, error) 
 }
 
 func evalSymlinks(path string) (string, error) {
-	path, err := walkSymlinks(path)
+	newpath, err := walkSymlinks(path)
 	if err != nil {
 		return "", err
 	}
-	return toNorm(path, normBase)
+	newpath, err = toNorm(newpath, normBase)
+	if err != nil {
+		return "", err
+	}
+	return newpath, nil
 }

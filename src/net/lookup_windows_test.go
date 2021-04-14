@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"internal/testenv"
 	"os/exec"
 	"reflect"
@@ -18,13 +19,14 @@ import (
 )
 
 var nslookupTestServers = []string{"mail.golang.com", "gmail.com"}
+var lookupTestIPs = []string{"8.8.8.8", "1.1.1.1"}
 
 func toJson(v interface{}) string {
 	data, _ := json.Marshal(v)
 	return string(data)
 }
 
-func TestLookupMX(t *testing.T) {
+func TestNSLookupMX(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
 
 	for _, server := range nslookupTestServers {
@@ -49,7 +51,7 @@ func TestLookupMX(t *testing.T) {
 	}
 }
 
-func TestLookupCNAME(t *testing.T) {
+func TestNSLookupCNAME(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
 
 	for _, server := range nslookupTestServers {
@@ -72,7 +74,7 @@ func TestLookupCNAME(t *testing.T) {
 	}
 }
 
-func TestLookupNS(t *testing.T) {
+func TestNSLookupNS(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
 
 	for _, server := range nslookupTestServers {
@@ -98,7 +100,7 @@ func TestLookupNS(t *testing.T) {
 	}
 }
 
-func TestLookupTXT(t *testing.T) {
+func TestNSLookupTXT(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
 
 	for _, server := range nslookupTestServers {
@@ -120,6 +122,54 @@ func TestLookupTXT(t *testing.T) {
 		sort.Strings(txt)
 		if !reflect.DeepEqual(expected, txt) {
 			t.Errorf("different results %s:\texp:%v\tgot:%v", server, toJson(expected), toJson(txt))
+		}
+	}
+}
+
+func TestLookupLocalPTR(t *testing.T) {
+	testenv.MustHaveExternalNetwork(t)
+
+	addr, err := localIP()
+	if err != nil {
+		t.Errorf("failed to get local ip: %s", err)
+	}
+	names, err := LookupAddr(addr.String())
+	if err != nil {
+		t.Errorf("failed %s: %s", addr, err)
+	}
+	if len(names) == 0 {
+		t.Errorf("no results")
+	}
+	expected, err := lookupPTR(addr.String())
+	if err != nil {
+		t.Logf("skipping failed lookup %s test: %s", addr.String(), err)
+	}
+	sort.Strings(expected)
+	sort.Strings(names)
+	if !reflect.DeepEqual(expected, names) {
+		t.Errorf("different results %s:\texp:%v\tgot:%v", addr, toJson(expected), toJson(names))
+	}
+}
+
+func TestLookupPTR(t *testing.T) {
+	testenv.MustHaveExternalNetwork(t)
+
+	for _, addr := range lookupTestIPs {
+		names, err := LookupAddr(addr)
+		if err != nil {
+			t.Errorf("failed %s: %s", addr, err)
+		}
+		if len(names) == 0 {
+			t.Errorf("no results")
+		}
+		expected, err := lookupPTR(addr)
+		if err != nil {
+			t.Logf("skipping failed lookup %s test: %s", addr, err)
+		}
+		sort.Strings(expected)
+		sort.Strings(names)
+		if !reflect.DeepEqual(expected, names) {
+			t.Errorf("different results %s:\texp:%v\tgot:%v", addr, toJson(expected), toJson(names))
 		}
 	}
 }
@@ -150,7 +200,7 @@ func nslookup(qtype, name string) (string, error) {
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
-	r := strings.Replace(out.String(), "\r\n", "\n", -1)
+	r := strings.ReplaceAll(out.String(), "\r\n", "\n")
 	// nslookup stderr output contains also debug information such as
 	// "Non-authoritative answer" and it doesn't return the correct errcode
 	if strings.Contains(err.String(), "can't find") {
@@ -229,4 +279,39 @@ func nslookupTXT(name string) (txt []string, err error) {
 		txt = append(txt, ans[2])
 	}
 	return
+}
+
+func ping(name string) (string, error) {
+	cmd := exec.Command("ping", "-n", "1", "-a", name)
+	stdoutStderr, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%v: %v", err, string(stdoutStderr))
+	}
+	r := strings.ReplaceAll(string(stdoutStderr), "\r\n", "\n")
+	return r, nil
+}
+
+func lookupPTR(name string) (ptr []string, err error) {
+	var r string
+	if r, err = ping(name); err != nil {
+		return
+	}
+	ptr = make([]string, 0, 10)
+	rx := regexp.MustCompile(`(?m)^Pinging\s+([a-zA-Z0-9.\-]+)\s+\[.*$`)
+	for _, ans := range rx.FindAllStringSubmatch(r, -1) {
+		ptr = append(ptr, ans[1]+".")
+	}
+	return
+}
+
+func localIP() (ip IP, err error) {
+	conn, err := Dial("udp", "golang.org:80")
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*UDPAddr)
+
+	return localAddr.IP, nil
 }

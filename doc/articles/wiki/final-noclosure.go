@@ -2,12 +2,15 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// +build ignore
+
 package main
 
 import (
 	"errors"
 	"html/template"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"regexp"
 )
@@ -89,7 +92,7 @@ func getTitle(w http.ResponseWriter, r *http.Request) (string, error) {
 	m := validPath.FindStringSubmatch(r.URL.Path)
 	if m == nil {
 		http.NotFound(w, r)
-		return "", errors.New("Invalid Page Title")
+		return "", errors.New("invalid Page Title")
 	}
 	return m[2], nil // The title is the second subexpression.
 }
@@ -98,5 +101,5 @@ func main() {
 	http.HandleFunc("/view/", viewHandler)
 	http.HandleFunc("/edit/", editHandler)
 	http.HandleFunc("/save/", saveHandler)
-	http.ListenAndServe(":8080", nil)
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }

@@ -8,8 +8,6 @@
 
 package cgotest
 
-import "C"
-
 import (
 	"bytes"
 	"crypto/md5"
@@ -22,11 +20,46 @@ import (
 )
 
 func test18146(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+
+	if runtime.GOOS == "darwin" {
+		t.Skipf("skipping flaky test on %s; see golang.org/issue/18202", runtime.GOOS)
+	}
+
+	if runtime.GOARCH == "mips" || runtime.GOARCH == "mips64" {
+		t.Skipf("skipping on %s", runtime.GOARCH)
+	}
+
 	attempts := 1000
 	threads := 4
 
-	if testing.Short() {
-		attempts = 100
+	// Restrict the number of attempts based on RLIMIT_NPROC.
+	// Tediously, RLIMIT_NPROC was left out of the syscall package,
+	// probably because it is not in POSIX.1, so we define it here.
+	// It is not defined on Solaris.
+	var nproc int
+	setNproc := true
+	switch runtime.GOOS {
+	default:
+		setNproc = false
+	case "aix":
+		nproc = 9
+	case "linux":
+		nproc = 6
+	case "darwin", "dragonfly", "freebsd", "netbsd", "openbsd":
+		nproc = 7
+	}
+	if setNproc {
+		var rlim syscall.Rlimit
+		if syscall.Getrlimit(nproc, &rlim) == nil {
+			max := int(rlim.Cur) / (threads + 5)
+			if attempts > max {
+				t.Logf("lowering attempts from %d to %d for RLIMIT_NPROC", attempts, max)
+				attempts = max
+			}
+		}
 	}
 
 	if os.Getenv("test18146") == "exec" {
@@ -40,7 +73,7 @@ func test18146(t *testing.T) {
 		}
 		runtime.GOMAXPROCS(threads)
 		argv := append(os.Args, "-test.run=NoSuchTestExists")
-		if err := syscall.Exec(os.Args[0], argv, nil); err != nil {
+		if err := syscall.Exec(os.Args[0], argv, os.Environ()); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -138,7 +138,6 @@ const (
 
 	REG_RESERVED // end of allocated registers
 
-	REGZERO = REG_R0  // set to zero
 	REGARG  = -1      // -1 disables passing the first argument in register
 	REGRT1  = REG_R3  // used during zeroing of the stack - not reserved
 	REGRT2  = REG_R4  // used during zeroing of the stack - not reserved
@@ -150,6 +149,32 @@ const (
 	REGSP   = REG_R15 // stack pointer
 )
 
+// LINUX for zSeries ELF Application Binary Interface Supplement
+// https://refspecs.linuxfoundation.org/ELF/zSeries/lzsabi0_zSeries/x1472.html
+var S390XDWARFRegisters = map[int16]int16{}
+
+func init() {
+	// f assigns dwarfregisters[from:to by step] = (base):((to-from)/step+base)
+	f := func(from, step, to, base int16) {
+		for r := int16(from); r <= to; r += step {
+			S390XDWARFRegisters[r] = (r-from)/step + base
+		}
+	}
+	f(REG_R0, 1, REG_R15, 0)
+
+	f(REG_F0, 2, REG_F6, 16)
+	f(REG_F1, 2, REG_F7, 20)
+	f(REG_F8, 2, REG_F14, 24)
+	f(REG_F9, 2, REG_F15, 28)
+
+	f(REG_V0, 2, REG_V6, 16) // V0:15 aliased to F0:15
+	f(REG_V1, 2, REG_V7, 20) // TODO what about V16:31?
+	f(REG_V8, 2, REG_V14, 24)
+	f(REG_V9, 2, REG_V15, 28)
+
+	f(REG_AR0, 1, REG_AR15, 48)
+}
+
 const (
 	BIG    = 32768 - 8
 	DISP12 = 4096
@@ -159,16 +184,9 @@ const (
 
 const (
 	// mark flags
-	LABEL   = 1 << 0
-	LEAF    = 1 << 1
-	FLOAT   = 1 << 2
-	BRANCH  = 1 << 3
-	LOAD    = 1 << 4
-	FCMP    = 1 << 5
-	SYNC    = 1 << 6
-	LIST    = 1 << 7
-	FOLL    = 1 << 8
-	NOSCHED = 1 << 9
+	LEAF = 1 << iota
+	BRANCH
+	USETMP // generated code of this Prog uses REGTMP
 )
 
 const ( // comments from func aclass in asmz.go
@@ -223,6 +241,7 @@ const (
 	AMULLD
 	AMULHD
 	AMULHDU
+	AMLGR
 	ASUB
 	ASUBC
 	ASUBV
@@ -250,9 +269,14 @@ const (
 	AMOVDLE
 	AMOVDLT
 	AMOVDNE
+	ALOCR
+	ALOCGR
 
 	// find leftmost one
 	AFLOGR
+
+	// population count
+	APOPCNT
 
 	// integer bitwise
 	AAND
@@ -269,6 +293,20 @@ const (
 	ASRAD
 	ARLL
 	ARLLG
+	ARNSBG
+	ARXSBG
+	AROSBG
+	ARNSBGT
+	ARXSBGT
+	AROSBGT
+	ARISBG
+	ARISBGN
+	ARISBGZ
+	ARISBGNZ
+	ARISBHG
+	ARISBLG
+	ARISBHGZ
+	ARISBLGZ
 
 	// floating point
 	AFABS
@@ -290,18 +328,25 @@ const (
 	AFNABS
 	AFNEG
 	AFNEGS
-	AFNMADD
-	AFNMADDS
-	AFNMSUB
-	AFNMSUBS
 	ALEDBR
 	ALDEBR
+	ALPDFR
+	ALNDFR
 	AFSUB
 	AFSUBS
 	AFSQRT
 	AFSQRTS
 	AFIEBR
 	AFIDBR
+	ACPSDR
+	ALTEBR
+	ALTDBR
+	ATCEB
+	ATCDB
+
+	// move from GPR to FPR and vice versa
+	ALDGR
+	ALGDR
 
 	// convert from int32/int64 to float/float64
 	ACEFBRA
@@ -333,6 +378,18 @@ const (
 	ACMPW
 	ACMPWU
 
+	// test under mask
+	ATMHH
+	ATMHL
+	ATMLH
+	ATMLL
+
+	// insert program mask
+	AIPM
+
+	// set program mask
+	ASPM
+
 	// compare and swap
 	ACS
 	ACSG
@@ -343,6 +400,7 @@ const (
 	// branch
 	ABC
 	ABCL
+	ABRC
 	ABEQ
 	ABGE
 	ABGT
@@ -355,7 +413,19 @@ const (
 	ABVS
 	ASYSCALL
 
+	// branch on count
+	ABRCT
+	ABRCTG
+
 	// compare and branch
+	ACRJ
+	ACGRJ
+	ACLRJ
+	ACLGRJ
+	ACIJ
+	ACGIJ
+	ACLIJ
+	ACLGIJ
 	ACMPBEQ
 	ACMPBGE
 	ACMPBGT
@@ -371,6 +441,7 @@ const (
 
 	// storage-and-storage
 	AMVC
+	AMVCIN
 	ACLC
 	AXC
 	AOC
@@ -911,6 +982,12 @@ const (
 	AVUPLB
 	AVUPLHW
 	AVUPLF
+	AVMSLG
+	AVMSLEG
+	AVMSLOG
+	AVMSLEOG
+
+	ANOPH // NOP
 
 	// binary
 	ABYTE

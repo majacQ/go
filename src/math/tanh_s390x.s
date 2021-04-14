@@ -59,12 +59,12 @@ GLOBL tanhtab<>+0(SB), RODATA, $128
 
 TEXT ·tanhAsm(SB),NOSPLIT,$0-16
 	FMOVD   x+0(FP), F0
-	//specail case Tanh(±0) = ±0
+	// special case Tanh(±0) = ±0
 	FMOVD   $(0.0), F1
 	FCMPU   F0, F1
 	BEQ     tanhIsZero
 	MOVD    $tanhrodataL18<>+0(SB), R5
-	WORD    $0xB3120000     //ltdbr %f0,%f0
+	LTDBR	F0, F0
 	MOVD    $0x4034000000000000, R1
 	BLTU    L15
 	FMOVD   F0, F1
@@ -72,21 +72,17 @@ L2:
 	MOVD    $tanhxadd<>+0(SB), R2
 	FMOVD   0(R2), F2
 	MOVD    tanhrlog2<>+0(SB), R2
-	WORD    $0xB3C10042     //ldgr %f4,%r2
+	LDGR    R2, F4
 	WFMSDB  V0, V4, V2, V4
 	MOVD    $tanhtab<>+0(SB), R3
-	WORD    $0xB3CD0024     //lgdr %r2,%f4
-	WORD    $0xEC4239BC     //risbg %r4,%r2,57,128+60,3
-	BYTE    $0x03
-	BYTE    $0x55
+	LGDR    F4, R2
+	RISBGZ	$57, $60, $3, R2, R4
 	WORD    $0xED105058     //cdb %f1,.L19-.L18(%r5)
 	BYTE    $0x00
 	BYTE    $0x19
-	WORD    $0xEC12000F     //risbgn %r1,%r2,64-64+0,64-64+0+16-1,64-0-16
-	BYTE    $0x30
-	BYTE    $0x59
+	RISBGN	$0, $15, $48, R2, R1
 	WORD    $0x68543000     //ld %f5,0(%r4,%r3)
-	WORD    $0xB3C10061     //ldgr %f6,%r1
+	LDGR    R1, F6
 	BLT     L3
 	MOVD    $tanhxzero<>+0(SB), R1
 	FMOVD   0(R1), F2
@@ -102,7 +98,7 @@ L2:
 L3:
 	FADD    F4, F2
 	FMOVD   tanhrodataL18<>+80(SB), F4
-	FMADD   F4, F2, F0, F0
+	FMADD   F4, F2, F0
 	FMOVD   tanhrodataL18<>+72(SB), F1
 	WFMDB   V0, V0, V3
 	FMOVD   tanhrodataL18<>+64(SB), F2
@@ -154,7 +150,7 @@ L15:
 L16:
 	FADD    F6, F2
 	FMOVD   tanhrodataL18<>+8(SB), F0
-	FMADD   F4, F2, F0, F0
+	FMADD   F4, F2, F0
 	FMOVD   tanhrodataL18<>+0(SB), F4
 	FNEG    F0, F0
 	WFMADB  V0, V2, V4, V0

@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const usage = `go run run.go [tests]
@@ -26,6 +27,8 @@ Tests may be specified without their .go suffix.
 `
 
 func main() {
+	start := time.Now()
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, usage)
 		flag.PrintDefaults()
@@ -70,6 +73,9 @@ func main() {
 		}
 	}
 	os.Remove(tmpdir)
+	if rc == 0 {
+		fmt.Printf("ok\t%s\t%s\n", filepath.Base(os.Args[0]), time.Since(start).Round(time.Millisecond))
+	}
 	os.Exit(rc)
 }
 
@@ -78,7 +84,7 @@ func main() {
 // and checks that the output matches the regexp want.
 func test(tmpdir, file, want string) error {
 	// Build the program.
-	prog := filepath.Join(tmpdir, file)
+	prog := filepath.Join(tmpdir, file+".exe")
 	cmd := exec.Command("go", "build", "-o", prog, file+".go")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -219,12 +225,5 @@ func fixcgo() {
 		// cgo1 and cgo2 don't run on netbsd, srandom has a different signature
 		skipTest("cgo1")
 		skipTest("cgo2")
-		// cgo3 and cgo4 don't run on netbsd, since cgo cannot handle stdout correctly, see issue #10715.
-		skipTest("cgo3")
-		skipTest("cgo4")
-	case "openbsd", "solaris":
-		// cgo3 and cgo4 don't run on openbsd and solaris, since cgo cannot handle stdout correctly, see issue #10715.
-		skipTest("cgo3")
-		skipTest("cgo4")
 	}
 }

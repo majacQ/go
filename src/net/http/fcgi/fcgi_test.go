@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -277,4 +278,122 @@ func TestMalformedParams(t *testing.T) {
 	rw := rwNopCloser{bytes.NewReader(input), ioutil.Discard}
 	c := newChild(rw, http.DefaultServeMux)
 	c.serve()
+}
+
+// a series of FastCGI records that start and end a request
+var streamFullRequestStdin = bytes.Join([][]byte{
+	// set up request
+	makeRecord(typeBeginRequest, 1,
+		[]byte{0, byte(roleResponder), 0, 0, 0, 0, 0, 0}),
+	// add required parameters
+	makeRecord(typeParams, 1, nameValuePair11("REQUEST_METHOD", "GET")),
+	makeRecord(typeParams, 1, nameValuePair11("SERVER_PROTOCOL", "HTTP/1.1")),
+	// set optional parameters
+	makeRecord(typeParams, 1, nameValuePair11("REMOTE_USER", "jane.doe")),
+	makeRecord(typeParams, 1, nameValuePair11("QUERY_STRING", "/foo/bar")),
+	makeRecord(typeParams, 1, nil),
+	// begin sending body of request
+	makeRecord(typeStdin, 1, []byte("0123456789abcdef")),
+	// end request
+	makeRecord(typeEndRequest, 1, nil),
+},
+	nil)
+
+var envVarTests = []struct {
+	input               []byte
+	envVar              string
+	expectedVal         string
+	expectedFilteredOut bool
+}{
+	{
+		streamFullRequestStdin,
+		"REMOTE_USER",
+		"jane.doe",
+		false,
+	},
+	{
+		streamFullRequestStdin,
+		"QUERY_STRING",
+		"",
+		true,
+	},
+}
+
+// Test that environment variables set for a request can be
+// read by a handler. Ensures that variables not set will not
+// be exposed to a handler.
+func TestChildServeReadsEnvVars(t *testing.T) {
+	for _, tt := range envVarTests {
+		input := make([]byte, len(tt.input))
+		copy(input, tt.input)
+		rc := nopWriteCloser{bytes.NewBuffer(input)}
+		done := make(chan bool)
+		c := newChild(rc, http.HandlerFunc(func(
+			w http.ResponseWriter,
+			r *http.Request,
+		) {
+			env := ProcessEnv(r)
+			if _, ok := env[tt.envVar]; ok && tt.expectedFilteredOut {
+				t.Errorf("Expected environment variable %s to not be set, but set to %s",
+					tt.envVar, env[tt.envVar])
+			} else if env[tt.envVar] != tt.expectedVal {
+				t.Errorf("Expected %s, got %s", tt.expectedVal, env[tt.envVar])
+			}
+			done <- true
+		}))
+		go c.serve()
+		<-done
+	}
+}
+
+func TestResponseWriterSniffsContentType(t *testing.T) {
+	t.Skip("this test is flaky, see Issue 41167")
+	var tests = []struct {
+		name   string
+		body   string
+		wantCT string
+	}{
+		{
+			name:   "no body",
+			wantCT: "text/plain; charset=utf-8",
+		},
+		{
+			name:   "html",
+			body:   "<html><head><title>test page</title></head><body>This is a body</body></html>",
+			wantCT: "text/html; charset=utf-8",
+		},
+		{
+			name:   "text",
+			body:   strings.Repeat("gopher", 86),
+			wantCT: "text/plain; charset=utf-8",
+		},
+		{
+			name:   "jpg",
+			body:   "\xFF\xD8\xFF" + strings.Repeat("B", 1024),
+			wantCT: "image/jpeg",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := make([]byte, len(streamFullRequestStdin))
+			copy(input, streamFullRequestStdin)
+			rc := nopWriteCloser{bytes.NewBuffer(input)}
+			done := make(chan bool)
+			var resp *response
+			c := newChild(rc, http.HandlerFunc(func(
+				w http.ResponseWriter,
+				r *http.Request,
+			) {
+				io.WriteString(w, tt.body)
+				resp = w.(*response)
+				done <- true
+			}))
+			defer c.cleanUp()
+			go c.serve()
+			<-done
+			if got := resp.Header().Get("Content-Type"); got != tt.wantCT {
+				t.Errorf("got a Content-Type of %q; expected it to start with %q", got, tt.wantCT)
+			}
+		})
+	}
 }

@@ -6,93 +6,108 @@
 
 #include "textflag.h"
 
-TEXT ·Asin(SB),NOSPLIT,$0
-	JMP	·asin(SB)
+TEXT ·Asin(SB), NOSPLIT, $0
+	JMP ·asin(SB)
 
-TEXT ·Acos(SB),NOSPLIT,$0
-	JMP	·acos(SB)
+TEXT ·Acos(SB), NOSPLIT, $0
+	JMP ·acos(SB)
 
-TEXT ·Atan2(SB),NOSPLIT,$0
-	JMP	·atan2(SB)
+TEXT ·Asinh(SB), NOSPLIT, $0
+	JMP ·asinh(SB)
 
-TEXT ·Atan(SB),NOSPLIT,$0
-	JMP	·atan(SB)
+TEXT ·Acosh(SB), NOSPLIT, $0
+	JMP ·acosh(SB)
 
-TEXT ·Dim(SB),NOSPLIT,$0
-	JMP	·dim(SB)
+TEXT ·Atan2(SB), NOSPLIT, $0
+	JMP ·atan2(SB)
 
-TEXT ·Min(SB),NOSPLIT,$0
-	JMP	·min(SB)
+TEXT ·Atan(SB), NOSPLIT, $0
+	JMP ·atan(SB)
 
-TEXT ·Max(SB),NOSPLIT,$0
-	JMP	·max(SB)
+TEXT ·Atanh(SB), NOSPLIT, $0
+	JMP ·atanh(SB)
 
-TEXT ·Exp2(SB),NOSPLIT,$0
-	JMP	·exp2(SB)
+TEXT ·Min(SB), NOSPLIT, $0
+	JMP ·min(SB)
 
-TEXT ·Expm1(SB),NOSPLIT,$0
-	JMP	·expm1(SB)
+TEXT ·Max(SB), NOSPLIT, $0
+	JMP ·max(SB)
 
-TEXT ·Exp(SB),NOSPLIT,$0
-	JMP	·exp(SB)
+TEXT ·Erf(SB), NOSPLIT, $0
+	JMP ·erf(SB)
 
-TEXT ·Floor(SB),NOSPLIT,$0
-	JMP	·floor(SB)
+TEXT ·Erfc(SB), NOSPLIT, $0
+	JMP ·erfc(SB)
 
-TEXT ·Ceil(SB),NOSPLIT,$0
-	JMP	·ceil(SB)
+TEXT ·Exp2(SB), NOSPLIT, $0
+	JMP ·exp2(SB)
 
-TEXT ·Trunc(SB),NOSPLIT,$0
-	JMP	·trunc(SB)
+TEXT ·Expm1(SB), NOSPLIT, $0
+	JMP ·expm1(SB)
 
-TEXT ·Frexp(SB),NOSPLIT,$0
-	JMP	·frexp(SB)
+TEXT ·Exp(SB), NOSPLIT, $0
+	JMP ·exp(SB)
 
-TEXT ·Hypot(SB),NOSPLIT,$0
-	JMP	·hypot(SB)
+TEXT ·Floor(SB), NOSPLIT, $0
+	JMP ·floor(SB)
 
-TEXT ·Ldexp(SB),NOSPLIT,$0
-	JMP	·ldexp(SB)
+TEXT ·Ceil(SB), NOSPLIT, $0
+	JMP ·ceil(SB)
 
-TEXT ·Log10(SB),NOSPLIT,$0
-	JMP	·log10(SB)
+TEXT ·Trunc(SB), NOSPLIT, $0
+	JMP ·trunc(SB)
 
-TEXT ·Log2(SB),NOSPLIT,$0
-	JMP	·log2(SB)
+TEXT ·Frexp(SB), NOSPLIT, $0
+	JMP ·frexp(SB)
 
-TEXT ·Log1p(SB),NOSPLIT,$0
-	JMP	·log1p(SB)
+TEXT ·Hypot(SB), NOSPLIT, $0
+	JMP ·hypot(SB)
 
-TEXT ·Log(SB),NOSPLIT,$0
-	JMP	·log(SB)
+TEXT ·Ldexp(SB), NOSPLIT, $0
+	JMP ·ldexp(SB)
 
-TEXT ·Modf(SB),NOSPLIT,$0
-	JMP	·modf(SB)
+TEXT ·Log10(SB), NOSPLIT, $0
+	JMP ·log10(SB)
 
-TEXT ·Mod(SB),NOSPLIT,$0
-	JMP	·mod(SB)
+TEXT ·Log2(SB), NOSPLIT, $0
+	JMP ·log2(SB)
 
-TEXT ·Remainder(SB),NOSPLIT,$0
-	JMP	·remainder(SB)
+TEXT ·Log1p(SB), NOSPLIT, $0
+	JMP ·log1p(SB)
 
-TEXT ·Sincos(SB),NOSPLIT,$0
-	JMP	·sincos(SB)
+TEXT ·Log(SB), NOSPLIT, $0
+	JMP ·log(SB)
 
-TEXT ·Sin(SB),NOSPLIT,$0
-	JMP	·sin(SB)
+TEXT ·Modf(SB), NOSPLIT, $0
+	JMP ·modf(SB)
 
-TEXT ·Sinh(SB),NOSPLIT,$0
-        JMP ·sinh(SB)
+TEXT ·Mod(SB), NOSPLIT, $0
+	JMP ·mod(SB)
 
-TEXT ·Cos(SB),NOSPLIT,$0
-	JMP	·cos(SB)
+TEXT ·Remainder(SB), NOSPLIT, $0
+	JMP ·remainder(SB)
 
-TEXT ·Cosh(SB),NOSPLIT,$0
-        JMP ·cosh(SB)
+TEXT ·Sin(SB), NOSPLIT, $0
+	JMP ·sin(SB)
 
-TEXT ·Tan(SB),NOSPLIT,$0
-	JMP	·tan(SB)
+TEXT ·Sinh(SB), NOSPLIT, $0
+	JMP ·sinh(SB)
 
-TEXT ·Tanh(SB),NOSPLIT,$0
-        JMP ·tanh(SB)
+TEXT ·Cos(SB), NOSPLIT, $0
+	JMP ·cos(SB)
+
+TEXT ·Cosh(SB), NOSPLIT, $0
+	JMP ·cosh(SB)
+
+TEXT ·Tan(SB), NOSPLIT, $0
+	JMP ·tan(SB)
+
+TEXT ·Tanh(SB), NOSPLIT, $0
+	JMP ·tanh(SB)
+
+TEXT ·Cbrt(SB), NOSPLIT, $0
+	JMP ·cbrt(SB)
+
+TEXT ·Pow(SB), NOSPLIT, $0
+	JMP ·pow(SB)
 

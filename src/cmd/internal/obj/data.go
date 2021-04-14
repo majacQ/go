@@ -1,6 +1,6 @@
 // Derived from Inferno utils/6l/obj.c and utils/6l/span.c
-// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/obj.c
-// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/span.c
+// https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/obj.c
+// https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/span.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -32,6 +32,7 @@
 package obj
 
 import (
+	"cmd/internal/objabi"
 	"log"
 	"math"
 )
@@ -45,12 +46,7 @@ func (s *LSym) Grow(lsiz int64) {
 	if len(s.P) >= siz {
 		return
 	}
-	// TODO(dfc) append cap-len at once, rather than
-	// one byte at a time.
-	for cap(s.P) < siz {
-		s.P = append(s.P[:cap(s.P)], 0)
-	}
-	s.P = s.P[:siz]
+	s.P = append(s.P, make([]byte, siz-len(s.P))...)
 }
 
 // GrowCap increases the capacity of s.P to c.
@@ -70,10 +66,15 @@ func (s *LSym) GrowCap(c int64) {
 // prepwrite prepares to write data of size siz into s at offset off.
 func (s *LSym) prepwrite(ctxt *Link, off int64, siz int) {
 	if off < 0 || siz < 0 || off >= 1<<30 {
-		log.Fatalf("prepwrite: bad off=%d siz=%d", off, siz)
+		ctxt.Diag("prepwrite: bad off=%d siz=%d s=%v", off, siz, s)
 	}
-	if s.Type == SBSS || s.Type == STLSBSS {
-		ctxt.Diag("cannot supply data for BSS var")
+	switch s.Type {
+	case objabi.Sxxx, objabi.SBSS:
+		s.Type = objabi.SDATA
+	case objabi.SNOPTRBSS:
+		s.Type = objabi.SNOPTRDATA
+	case objabi.STLSBSS:
+		ctxt.Diag("cannot supply data for %v var %v", s.Type, s.Name)
 	}
 	l := off + int64(siz)
 	s.Grow(l)
@@ -111,10 +112,9 @@ func (s *LSym) WriteInt(ctxt *Link, off int64, siz int, i int64) {
 	}
 }
 
-// WriteAddr writes an address of size siz into s at offset off.
-// rsym and roff specify the relocation for the address.
-func (s *LSym) WriteAddr(ctxt *Link, off int64, siz int, rsym *LSym, roff int64) {
-	if siz != ctxt.Arch.PtrSize {
+func (s *LSym) writeAddr(ctxt *Link, off int64, siz int, rsym *LSym, roff int64, rtype objabi.RelocType) {
+	// Allow 4-byte addresses for DWARF.
+	if siz != ctxt.Arch.PtrSize && siz != 4 {
 		ctxt.Diag("WriteAddr: bad address size %d in %s", siz, s.Name)
 	}
 	s.prepwrite(ctxt, off, siz)
@@ -125,8 +125,22 @@ func (s *LSym) WriteAddr(ctxt *Link, off int64, siz int, rsym *LSym, roff int64)
 	}
 	r.Siz = uint8(siz)
 	r.Sym = rsym
-	r.Type = R_ADDR
+	r.Type = rtype
 	r.Add = roff
+}
+
+// WriteAddr writes an address of size siz into s at offset off.
+// rsym and roff specify the relocation for the address.
+func (s *LSym) WriteAddr(ctxt *Link, off int64, siz int, rsym *LSym, roff int64) {
+	s.writeAddr(ctxt, off, siz, rsym, roff, objabi.R_ADDR)
+}
+
+// WriteCURelativeAddr writes a pointer-sized address into s at offset off.
+// rsym and roff specify the relocation for the address which will be
+// resolved by the linker to an offset from the DW_AT_low_pc attribute of
+// the DWARF Compile Unit of rsym.
+func (s *LSym) WriteCURelativeAddr(ctxt *Link, off int64, rsym *LSym, roff int64) {
+	s.writeAddr(ctxt, off, ctxt.Arch.PtrSize, rsym, roff, objabi.R_ADDRCUOFF)
 }
 
 // WriteOff writes a 4 byte offset to rsym+roff into s at offset off.
@@ -141,7 +155,7 @@ func (s *LSym) WriteOff(ctxt *Link, off int64, rsym *LSym, roff int64) {
 	}
 	r.Siz = 4
 	r.Sym = rsym
-	r.Type = R_ADDROFF
+	r.Type = objabi.R_ADDROFF
 	r.Add = roff
 }
 
@@ -157,7 +171,7 @@ func (s *LSym) WriteWeakOff(ctxt *Link, off int64, rsym *LSym, roff int64) {
 	}
 	r.Siz = 4
 	r.Sym = rsym
-	r.Type = R_WEAKADDROFF
+	r.Type = objabi.R_WEAKADDROFF
 	r.Add = roff
 }
 
@@ -178,29 +192,9 @@ func (s *LSym) WriteBytes(ctxt *Link, off int64, b []byte) int64 {
 }
 
 func Addrel(s *LSym) *Reloc {
+	if s.R == nil {
+		s.R = make([]Reloc, 0, 4)
+	}
 	s.R = append(s.R, Reloc{})
 	return &s.R[len(s.R)-1]
-}
-
-func Setuintxx(ctxt *Link, s *LSym, off int64, v uint64, wid int64) int64 {
-	if s.Type == 0 {
-		s.Type = SDATA
-	}
-	if s.Size < off+wid {
-		s.Size = off + wid
-		s.Grow(s.Size)
-	}
-
-	switch wid {
-	case 1:
-		s.P[off] = uint8(v)
-	case 2:
-		ctxt.Arch.ByteOrder.PutUint16(s.P[off:], uint16(v))
-	case 4:
-		ctxt.Arch.ByteOrder.PutUint32(s.P[off:], uint32(v))
-	case 8:
-		ctxt.Arch.ByteOrder.PutUint64(s.P[off:], v)
-	}
-
-	return off + wid
 }

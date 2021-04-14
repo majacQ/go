@@ -35,21 +35,17 @@ import (
 )
 
 func init() {
-	obj.RegisterRegister(obj.RBaseMIPS, REG_LAST+1, Rconv)
+	obj.RegisterRegister(obj.RBaseMIPS, REG_LAST+1, rconv)
 	obj.RegisterOpcode(obj.ABaseMIPS, Anames)
 }
 
-func Rconv(r int) string {
+func rconv(r int) string {
 	if r == 0 {
 		return "NONE"
 	}
 	if r == REGG {
 		// Special case.
 		return "g"
-	}
-	if r == REGSB {
-		// Special case.
-		return "RSB"
 	}
 	if REG_R0 <= r && r <= REG_R31 {
 		return fmt.Sprintf("R%d", r-REG_R0)
@@ -62,6 +58,9 @@ func Rconv(r int) string {
 	}
 	if REG_FCR0 <= r && r <= REG_FCR31 {
 		return fmt.Sprintf("FCR%d", r-REG_FCR0)
+	}
+	if REG_W0 <= r && r <= REG_W31 {
+		return fmt.Sprintf("W%d", r-REG_W0)
 	}
 	if r == REG_HI {
 		return "HI"

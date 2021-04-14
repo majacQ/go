@@ -4,165 +4,109 @@
 
 package gc
 
-// a function named init is a special case.
-// it is called by the initialization before
-// main is run. to make it unique within a
-// package and also uncallable, the name,
-// normally "pkg.init", is altered to "pkg.init.1".
+import (
+	"cmd/compile/internal/types"
+	"cmd/internal/obj"
+)
 
-var renameinit_initgen int
+// A function named init is a special case.
+// It is called by the initialization before main is run.
+// To make it unique within a package and also uncallable,
+// the name, normally "pkg.init", is altered to "pkg.init.0".
+var renameinitgen int
 
-func renameinit() *Sym {
-	renameinit_initgen++
-	return lookupN("init.", renameinit_initgen)
+// Dummy function for autotmps generated during typechecking.
+var dummyInitFn = nod(ODCLFUNC, nil, nil)
+
+func renameinit() *types.Sym {
+	s := lookupN("init.", renameinitgen)
+	renameinitgen++
+	return s
 }
 
-// hand-craft the following initialization code
-//      var initdone· uint8                             (1)
-//      func init() {                                   (2)
-//              if initdone· > 1 {                      (3)
-//                      return                          (3a)
-//              }
-//              if initdone· == 1 {                     (4)
-//                      throw()                         (4a)
-//              }
-//              initdone· = 1                           (5)
-//              // over all matching imported symbols
-//                      <pkg>.init()                    (6)
-//              { <init stmts> }                        (7)
-//              init.<n>() // if any                    (8)
-//              initdone· = 2                           (9)
-//              return                                  (10)
-//      }
-func anyinit(n []*Node) bool {
-	// are there any interesting init statements
-	for _, ln := range n {
-		switch ln.Op {
-		case ODCLFUNC, ODCLCONST, ODCLTYPE, OEMPTY:
-			break
-
-		case OAS, OASWB:
-			if isblank(ln.Left) && candiscard(ln.Right) {
-				break
-			}
-			fallthrough
-		default:
-			return true
-		}
-	}
-
-	// is this main
-	if localpkg.Name == "main" {
-		return true
-	}
-
-	// is there an explicit init function
-	s := lookup("init.1")
-
-	if s.Def != nil {
-		return true
-	}
-
-	// are there any imported init functions
-	for _, s := range initSyms {
-		if s.Def != nil {
-			return true
-		}
-	}
-
-	// then none
-	return false
-}
-
+// fninit makes an initialization record for the package.
+// See runtime/proc.go:initTask for its layout.
+// The 3 tasks for initialization are:
+//   1) Initialize all of the packages the current package depends on.
+//   2) Initialize all the variables that have initializers.
+//   3) Run any init functions.
 func fninit(n []*Node) {
-	// This code is using the last value of lineno for position information
-	// (see comment in noder.go, noder.file method, for details).
+	nf := initOrder(n)
 
-	nf := initfix(n)
-	if !anyinit(nf) {
-		return
+	var deps []*obj.LSym // initTask records for packages the current package depends on
+	var fns []*obj.LSym  // functions to call for package initialization
+
+	// Find imported packages with init tasks.
+	for _, s := range types.InitSyms {
+		deps = append(deps, s.Linksym())
 	}
 
-	var r []*Node
-
-	// (1)
-	gatevar := newname(lookup("initdone·"))
-	addvar(gatevar, Types[TUINT8], PEXTERN)
-
-	// (2)
-	Maxarg = 0
-
-	fn := nod(ODCLFUNC, nil, nil)
-	initsym := lookup("init")
-	fn.Func.Nname = newname(initsym)
-	fn.Func.Nname.Name.Defn = fn
-	fn.Func.Nname.Name.Param.Ntype = nod(OTFUNC, nil, nil)
-	declare(fn.Func.Nname, PFUNC)
-	funchdr(fn)
-
-	// (3)
-	a := nod(OIF, nil, nil)
-	a.Left = nod(OGT, gatevar, nodintconst(1))
-	a.Likely = 1
-	r = append(r, a)
-	// (3a)
-	a.Nbody.Set1(nod(ORETURN, nil, nil))
-
-	// (4)
-	b := nod(OIF, nil, nil)
-	b.Left = nod(OEQ, gatevar, nodintconst(1))
-	// this actually isn't likely, but code layout is better
-	// like this: no JMP needed after the call.
-	b.Likely = 1
-	r = append(r, b)
-	// (4a)
-	b.Nbody.Set1(nod(OCALL, syslook("throwinit"), nil))
-
-	// (5)
-	a = nod(OAS, gatevar, nodintconst(1))
-
-	r = append(r, a)
-
-	// (6)
-	for _, s := range initSyms {
-		if s.Def != nil && s != initsym {
-			// could check that it is fn of no args/returns
-			a = nod(OCALL, s.Def, nil)
-			r = append(r, a)
+	// Make a function that contains all the initialization statements.
+	if len(nf) > 0 {
+		lineno = nf[0].Pos // prolog/epilog gets line number of first init stmt
+		initializers := lookup("init")
+		disableExport(initializers)
+		fn := dclfunc(initializers, nod(OTFUNC, nil, nil))
+		for _, dcl := range dummyInitFn.Func.Dcl {
+			dcl.Name.Curfn = fn
 		}
+		fn.Func.Dcl = append(fn.Func.Dcl, dummyInitFn.Func.Dcl...)
+		dummyInitFn.Func.Dcl = nil
+
+		fn.Nbody.Set(nf)
+		funcbody()
+
+		fn = typecheck(fn, ctxStmt)
+		Curfn = fn
+		typecheckslice(nf, ctxStmt)
+		Curfn = nil
+		funccompile(fn)
+		fns = append(fns, initializers.Linksym())
+	}
+	if dummyInitFn.Func.Dcl != nil {
+		// We only generate temps using dummyInitFn if there
+		// are package-scope initialization statements, so
+		// something's weird if we get here.
+		Fatalf("dummyInitFn still has declarations")
 	}
 
-	// (7)
-	r = append(r, nf...)
-
-	// (8)
-	// could check that it is fn of no args/returns
-	for i := 1; ; i++ {
+	// Record user init functions.
+	for i := 0; i < renameinitgen; i++ {
 		s := lookupN("init.", i)
-		if s.Def == nil {
-			break
+		fn := asNode(s.Def).Name.Defn
+		// Skip init functions with empty bodies.
+		// noder.go doesn't allow external init functions, and
+		// order.go has already removed any OEMPTY nodes, so
+		// checking Len() == 0 is sufficient here.
+		if fn.Nbody.Len() == 0 {
+			continue
 		}
-		a = nod(OCALL, s.Def, nil)
-		r = append(r, a)
+		fns = append(fns, s.Linksym())
 	}
 
-	// (9)
-	a = nod(OAS, gatevar, nodintconst(2))
+	if len(deps) == 0 && len(fns) == 0 && localpkg.Name != "main" && localpkg.Name != "runtime" {
+		return // nothing to initialize
+	}
 
-	r = append(r, a)
-
-	// (10)
-	a = nod(ORETURN, nil, nil)
-
-	r = append(r, a)
-	exportsym(fn.Func.Nname)
-
-	fn.Nbody.Set(r)
-	funcbody(fn)
-
-	Curfn = fn
-	fn = typecheck(fn, Etop)
-	typecheckslice(r, Etop)
-	Curfn = nil
-	funccompile(fn)
+	// Make an .inittask structure.
+	sym := lookup(".inittask")
+	nn := newname(sym)
+	nn.Type = types.Types[TUINT8] // dummy type
+	nn.SetClass(PEXTERN)
+	sym.Def = asTypesNode(nn)
+	exportsym(nn)
+	lsym := sym.Linksym()
+	ot := 0
+	ot = duintptr(lsym, ot, 0) // state: not initialized yet
+	ot = duintptr(lsym, ot, uint64(len(deps)))
+	ot = duintptr(lsym, ot, uint64(len(fns)))
+	for _, d := range deps {
+		ot = dsymptr(lsym, ot, d, 0)
+	}
+	for _, f := range fns {
+		ot = dsymptr(lsym, ot, f, 0)
+	}
+	// An initTask has pointers, but none into the Go heap.
+	// It's not quite read only, the state field must be modifiable.
+	ggloblsym(lsym, int32(ot), obj.NOPTR)
 }
