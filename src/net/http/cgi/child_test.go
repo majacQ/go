@@ -7,6 +7,11 @@
 package cgi
 
 import (
+	"bufio"
+	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +27,7 @@ func TestRequest(t *testing.T) {
 		"CONTENT_LENGTH":  "123",
 		"CONTENT_TYPE":    "text/xml",
 		"REMOTE_ADDR":     "5.6.7.8",
+		"REMOTE_PORT":     "54321",
 	}
 	req, err := RequestFromMap(env)
 	if err != nil {
@@ -60,7 +66,7 @@ func TestRequest(t *testing.T) {
 	if req.TLS != nil {
 		t.Errorf("expected nil TLS")
 	}
-	if e, g := "5.6.7.8:0", req.RemoteAddr; e != g {
+	if e, g := "5.6.7.8:54321", req.RemoteAddr; e != g {
 		t.Errorf("RemoteAddr: got %q; want %q", g, e)
 	}
 }
@@ -127,5 +133,87 @@ func TestRequestWithoutRequestURI(t *testing.T) {
 	}
 	if g, e := req.URL.String(), "http://example.com/dir/scriptname/p1/p2?a=1&b=2"; e != g {
 		t.Errorf("URL = %q; want %q", g, e)
+	}
+}
+
+func TestRequestWithoutRemotePort(t *testing.T) {
+	env := map[string]string{
+		"SERVER_PROTOCOL": "HTTP/1.1",
+		"HTTP_HOST":       "example.com",
+		"REQUEST_METHOD":  "GET",
+		"REQUEST_URI":     "/path?a=b",
+		"CONTENT_LENGTH":  "123",
+		"REMOTE_ADDR":     "5.6.7.8",
+	}
+	req, err := RequestFromMap(env)
+	if err != nil {
+		t.Fatalf("RequestFromMap: %v", err)
+	}
+	if e, g := "5.6.7.8:0", req.RemoteAddr; e != g {
+		t.Errorf("RemoteAddr: got %q; want %q", g, e)
+	}
+}
+
+type countingWriter int
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	*c += countingWriter(len(p))
+	return len(p), nil
+}
+func (c *countingWriter) WriteString(p string) (int, error) {
+	*c += countingWriter(len(p))
+	return len(p), nil
+}
+
+func TestResponse(t *testing.T) {
+	var tests = []struct {
+		name   string
+		body   string
+		wantCT string
+	}{
+		{
+			name:   "no body",
+			wantCT: "text/plain; charset=utf-8",
+		},
+		{
+			name:   "html",
+			body:   "<html><head><title>test page</title></head><body>This is a body</body></html>",
+			wantCT: "text/html; charset=utf-8",
+		},
+		{
+			name:   "text",
+			body:   strings.Repeat("gopher", 86),
+			wantCT: "text/plain; charset=utf-8",
+		},
+		{
+			name:   "jpg",
+			body:   "\xFF\xD8\xFF" + strings.Repeat("B", 1024),
+			wantCT: "image/jpeg",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			resp := response{
+				req:    httptest.NewRequest("GET", "/", nil),
+				header: http.Header{},
+				bufw:   bufio.NewWriter(&buf),
+			}
+			n, err := resp.Write([]byte(tt.body))
+			if err != nil {
+				t.Errorf("Write: unexpected %v", err)
+			}
+			if want := len(tt.body); n != want {
+				t.Errorf("reported short Write: got %v want %v", n, want)
+			}
+			resp.writeCGIHeader(nil)
+			resp.Flush()
+			if got := resp.Header().Get("Content-Type"); got != tt.wantCT {
+				t.Errorf("wrong content-type: got %q, want %q", got, tt.wantCT)
+			}
+			if !bytes.HasSuffix(buf.Bytes(), []byte(tt.body)) {
+				t.Errorf("body was not correctly written")
+			}
+		})
 	}
 }

@@ -1,50 +1,69 @@
+// Copyright 2013 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package x509
 
-import "testing"
+import (
+	"os"
+	"os/exec"
+	"testing"
+	"time"
+)
 
 func TestSystemRoots(t *testing.T) {
-	sysRoots := systemRootsPool()         // actual system roots
-	execRoots, err := execSecurityRoots() // non-cgo roots
+	t0 := time.Now()
+	sysRoots, err := loadSystemRoots() // actual system roots
+	sysRootsDuration := time.Since(t0)
 
 	if err != nil {
 		t.Fatalf("failed to read system roots: %v", err)
 	}
 
-	for _, tt := range []*CertPool{sysRoots, execRoots} {
-		if tt == nil {
-			t.Fatal("no system roots")
-		}
-		// On Mavericks, there are 212 bundled certs; require only
-		// 150 here, since this is just a sanity check, and the
-		// exact number will vary over time.
-		if want, have := 150, len(tt.certs); have < want {
-			t.Fatalf("want at least %d system roots, have %d", want, have)
-		}
+	t.Logf("loadSystemRoots: %v", sysRootsDuration)
+
+	// There are 174 system roots on Catalina, and 163 on iOS right now, require
+	// at least 100 to make sure this is not completely broken.
+	if want, have := 100, len(sysRoots.certs); have < want {
+		t.Errorf("want at least %d system roots, have %d", want, have)
 	}
 
-	// Check that the two cert pools are roughly the same;
-	// |A∩B| > max(|A|, |B|) / 2 should be a reasonably robust check.
+	if loadSystemRootsWithCgo == nil {
+		t.Skip("cgo not available, can't compare pool")
+	}
 
-	isect := make(map[string]bool, len(sysRoots.certs))
+	t1 := time.Now()
+	cgoRoots, err := loadSystemRootsWithCgo() // cgo roots
+	cgoSysRootsDuration := time.Since(t1)
+
+	if err != nil {
+		t.Fatalf("failed to read cgo roots: %v", err)
+	}
+
+	t.Logf("loadSystemRootsWithCgo: %v", cgoSysRootsDuration)
+
+	// Check that the two cert pools are the same.
+	sysPool := make(map[string]*Certificate, len(sysRoots.certs))
 	for _, c := range sysRoots.certs {
-		isect[string(c.Raw)] = true
+		sysPool[string(c.Raw)] = c
 	}
-
-	have := 0
-	for _, c := range execRoots.certs {
-		if isect[string(c.Raw)] {
-			have++
+	for _, c := range cgoRoots.certs {
+		if _, ok := sysPool[string(c.Raw)]; ok {
+			delete(sysPool, string(c.Raw))
+		} else {
+			t.Errorf("certificate only present in cgo pool: %v", c.Subject)
 		}
 	}
-
-	var want int
-	if nsys, nexec := len(sysRoots.certs), len(execRoots.certs); nsys > nexec {
-		want = nsys / 2
-	} else {
-		want = nexec / 2
+	for _, c := range sysPool {
+		t.Errorf("certificate only present in real pool: %v", c.Subject)
 	}
 
-	if have < want {
-		t.Errorf("insufficent overlap between cgo and non-cgo roots; want at least %d, have %d", want, have)
+	if t.Failed() {
+		cmd := exec.Command("security", "dump-trust-settings")
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		cmd.Run()
+		cmd = exec.Command("security", "dump-trust-settings", "-d")
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		cmd.Run()
 	}
 }

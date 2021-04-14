@@ -33,7 +33,7 @@ func Getgroups() (gids []int, err error) {
 		return nil, nil
 	}
 
-	// Sanity check group count.  Max is 16 on BSD.
+	// Sanity check group count. Max is 16 on BSD.
 	if n < 0 || n > 1000 {
 		return nil, EINVAL
 	}
@@ -68,40 +68,7 @@ func ReadDirent(fd int, buf []byte) (n int, err error) {
 	// actual system call is getdirentries64, 64 is a good guess.
 	// TODO(rsc): Can we use a single global basep for all calls?
 	var base = (*uintptr)(unsafe.Pointer(new(uint64)))
-	n, err = Getdirentries(fd, buf, base)
-
-	// On OS X 10.10 Yosemite, if you have a directory that can be returned
-	// in a single getdirentries64 call (for example, a directory with one file),
-	// and you read from the directory at EOF twice, you get EOF both times:
-	//	fd = open("dir")
-	//	getdirentries64(fd) // returns data
-	//	getdirentries64(fd) // returns 0 (EOF)
-	//	getdirentries64(fd) // returns 0 (EOF)
-	//
-	// But if you remove the file in the middle between the two calls, the
-	// second call returns an error instead.
-	//	fd = open("dir")
-	//	getdirentries64(fd) // returns data
-	//	getdirentries64(fd) // returns 0 (EOF)
-	//	remove("dir/file")
-	//	getdirentries64(fd) // returns ENOENT/EINVAL
-	//
-	// Whether you get ENOENT or EINVAL depends on exactly what was
-	// in the directory. It is deterministic, just data-dependent.
-	//
-	// This only happens in small directories. A directory containing more data
-	// than fits in a 4k getdirentries64 call will return EOF correctly.
-	// (It's not clear if the criteria is that the directory be split across multiple
-	// getdirentries64 calls or that it be split across multiple file system blocks.)
-	//
-	// We could change package os to avoid the second read at EOF,
-	// and maybe we should, but that's a bit involved.
-	// For now, treat the EINVAL/ENOENT as EOF.
-	if runtime.GOOS == "darwin" && (err == EINVAL || err == ENOENT) {
-		err = nil
-	}
-
-	return
+	return Getdirentries(fd, buf, base)
 }
 
 // Wait status is 7 bits at bottom, either 0 (exited),
@@ -275,7 +242,7 @@ func anyToSockaddr(rsa *RawSockaddrAny) (Sockaddr, error) {
 				break
 			}
 		}
-		bytes := (*[10000]byte)(unsafe.Pointer(&pp.Path[0]))[0:n]
+		bytes := (*[len(pp.Path)]byte)(unsafe.Pointer(&pp.Path[0]))[0:n]
 		sa.Name = string(bytes)
 		return sa, nil
 
@@ -480,8 +447,6 @@ func Kevent(kq int, changes, events []Kevent_t, timeout *Timespec) (n int, err e
 	return kevent(kq, change, len(changes), event, len(events), timeout)
 }
 
-//sys	sysctl(mib []_C_int, old *byte, oldlen *uintptr, new *byte, newlen uintptr) (err error) = SYS___SYSCTL
-
 func Sysctl(name string) (value string, err error) {
 	// Translate name to mib number.
 	mib, err := nametomib(name)
@@ -540,10 +505,17 @@ func Utimes(path string, tv []Timeval) (err error) {
 }
 
 func UtimesNano(path string, ts []Timespec) error {
-	// TODO: The BSDs can do utimensat with SYS_UTIMENSAT but it
-	// isn't supported by darwin so this uses utimes instead
 	if len(ts) != 2 {
 		return EINVAL
+	}
+	// Darwin setattrlist can set nanosecond timestamps
+	err := setattrlistTimes(path, ts)
+	if err != ENOSYS {
+		return err
+	}
+	err = utimensat(_AT_FDCWD, path, (*[2]Timespec)(unsafe.Pointer(&ts[0])), 0)
+	if err != ENOSYS {
+		return err
 	}
 	// Not as efficient as it could be because Timespec and
 	// Timeval have different types in the different OSes
@@ -564,14 +536,6 @@ func Futimes(fd int, tv []Timeval) (err error) {
 }
 
 //sys	fcntl(fd int, cmd int, arg int) (val int, err error)
-
-// TODO: wrap
-//	Acct(name nil-string) (err error)
-//	Gethostuuid(uuid *byte, timeout *Timespec) (err error)
-//	Madvise(addr *byte, len int, behav int) (err error)
-//	Mprotect(addr *byte, len int, prot int) (err error)
-//	Msync(addr *byte, len int, flags int) (err error)
-//	Ptrace(req int, pid int, addr uintptr, data int) (ret uintptr, err error)
 
 var mapper = &mmapper{
 	active: make(map[*byte][]byte),

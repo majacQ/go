@@ -7,7 +7,7 @@
 /*
 Input to cgo -cdefs
 
-GOARCH=power64 cgo -cdefs defs_linux.go defs3_linux.go > defs_linux_power64.h
+GOARCH=ppc64 cgo -cdefs defs_linux.go defs3_linux.go > defs_linux_ppc64.h
 */
 
 package runtime
@@ -35,9 +35,9 @@ type Gregset C.elf_gregset_t
 type FPregset C.elf_fpregset_t
 type Vreg C.elf_vrreg_t
 
-type SigaltstackT C.struct_sigaltstack
+type StackT C.stack_t
 
 // PPC64 uses sigcontext in place of mcontext in ucontext.
-// see http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/arch/powerpc/include/uapi/asm/ucontext.h
+// see https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/tree/arch/powerpc/include/uapi/asm/ucontext.h
 type Sigcontext C.struct_sigcontext
 type Ucontext C.struct_ucontext

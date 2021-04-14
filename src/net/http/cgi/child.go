@@ -86,10 +86,8 @@ func RequestFromMap(params map[string]string) (*http.Request, error) {
 		if !strings.HasPrefix(k, "HTTP_") || k == "HTTP_HOST" {
 			continue
 		}
-		r.Header.Add(strings.Replace(k[5:], "_", "-", -1), v)
+		r.Header.Add(strings.ReplaceAll(k[5:], "_", "-"), v)
 	}
-
-	// TODO: cookies.  parsing them isn't exported, though.
 
 	uriStr := params["REQUEST_URI"]
 	if uriStr == "" {
@@ -102,7 +100,7 @@ func RequestFromMap(params map[string]string) (*http.Request, error) {
 	}
 
 	// There's apparently a de-facto standard for this.
-	// http://docstore.mik.ua/orelly/linux/cgi/ch03_02.htm#ch03-35636
+	// https://web.archive.org/web/20170105004655/http://docstore.mik.ua/orelly/linux/cgi/ch03_02.htm#ch03-35636
 	if s := params["HTTPS"]; s == "on" || s == "ON" || s == "1" {
 		r.TLS = &tls.ConnectionState{HandshakeComplete: true}
 	}
@@ -132,9 +130,9 @@ func RequestFromMap(params map[string]string) (*http.Request, error) {
 	}
 
 	// Request.RemoteAddr has its port set by Go's standard http
-	// server, so we do here too. We don't have one, though, so we
-	// use a dummy one.
-	r.RemoteAddr = net.JoinHostPort(params["REMOTE_ADDR"], "0")
+	// server, so we do here too.
+	remotePort, _ := strconv.Atoi(params["REMOTE_PORT"]) // zero if unset or invalid
+	r.RemoteAddr = net.JoinHostPort(params["REMOTE_ADDR"], strconv.Itoa(remotePort))
 
 	return r, nil
 }
@@ -165,10 +163,12 @@ func Serve(handler http.Handler) error {
 }
 
 type response struct {
-	req        *http.Request
-	header     http.Header
-	bufw       *bufio.Writer
-	headerSent bool
+	req            *http.Request
+	header         http.Header
+	code           int
+	wroteHeader    bool
+	wroteCGIHeader bool
+	bufw           *bufio.Writer
 }
 
 func (r *response) Flush() {
@@ -180,26 +180,38 @@ func (r *response) Header() http.Header {
 }
 
 func (r *response) Write(p []byte) (n int, err error) {
-	if !r.headerSent {
+	if !r.wroteHeader {
 		r.WriteHeader(http.StatusOK)
+	}
+	if !r.wroteCGIHeader {
+		r.writeCGIHeader(p)
 	}
 	return r.bufw.Write(p)
 }
 
 func (r *response) WriteHeader(code int) {
-	if r.headerSent {
+	if r.wroteHeader {
 		// Note: explicitly using Stderr, as Stdout is our HTTP output.
 		fmt.Fprintf(os.Stderr, "CGI attempted to write header twice on request for %s", r.req.URL)
 		return
 	}
-	r.headerSent = true
-	fmt.Fprintf(r.bufw, "Status: %d %s\r\n", code, http.StatusText(code))
+	r.wroteHeader = true
+	r.code = code
+}
 
-	// Set a default Content-Type
-	if _, hasType := r.header["Content-Type"]; !hasType {
-		r.header.Add("Content-Type", "text/html; charset=utf-8")
+// writeCGIHeader finalizes the header sent to the client and writes it to the output.
+// p is not written by writeHeader, but is the first chunk of the body
+// that will be written. It is sniffed for a Content-Type if none is
+// set explicitly.
+func (r *response) writeCGIHeader(p []byte) {
+	if r.wroteCGIHeader {
+		return
 	}
-
+	r.wroteCGIHeader = true
+	fmt.Fprintf(r.bufw, "Status: %d %s\r\n", r.code, http.StatusText(r.code))
+	if _, hasType := r.header["Content-Type"]; !hasType {
+		r.header.Set("Content-Type", http.DetectContentType(p))
+	}
 	r.header.Write(r.bufw)
 	r.bufw.WriteString("\r\n")
 	r.bufw.Flush()

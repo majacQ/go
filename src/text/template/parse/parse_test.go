@@ -30,8 +30,15 @@ var numberTests = []numberTest{
 	{"0", true, true, true, false, 0, 0, 0, 0},
 	{"-0", true, true, true, false, 0, 0, 0, 0}, // check that -0 is a uint.
 	{"73", true, true, true, false, 73, 73, 73, 0},
+	{"7_3", true, true, true, false, 73, 73, 73, 0},
+	{"0b10_010_01", true, true, true, false, 73, 73, 73, 0},
+	{"0B10_010_01", true, true, true, false, 73, 73, 73, 0},
 	{"073", true, true, true, false, 073, 073, 073, 0},
+	{"0o73", true, true, true, false, 073, 073, 073, 0},
+	{"0O73", true, true, true, false, 073, 073, 073, 0},
 	{"0x73", true, true, true, false, 0x73, 0x73, 0x73, 0},
+	{"0X73", true, true, true, false, 0x73, 0x73, 0x73, 0},
+	{"0x7_3", true, true, true, false, 0x73, 0x73, 0x73, 0},
 	{"-73", true, false, true, false, -73, 0, -73, 0},
 	{"+73", true, false, true, false, 73, 0, 73, 0},
 	{"100", true, true, true, false, 100, 100, 100, 0},
@@ -39,7 +46,12 @@ var numberTests = []numberTest{
 	{"-1e9", true, false, true, false, -1e9, 0, -1e9, 0},
 	{"-1.2", false, false, true, false, 0, 0, -1.2, 0},
 	{"1e19", false, true, true, false, 0, 1e19, 1e19, 0},
+	{"1e1_9", false, true, true, false, 0, 1e19, 1e19, 0},
+	{"1E19", false, true, true, false, 0, 1e19, 1e19, 0},
 	{"-1e19", false, false, true, false, 0, 0, -1e19, 0},
+	{"0x_1p4", true, true, true, false, 16, 16, 16, 0},
+	{"0X_1P4", true, true, true, false, 16, 16, 16, 0},
+	{"0x_1p-4", false, false, true, false, 0, 0, 1 / 16., 0},
 	{"4i", false, false, false, true, 0, 0, 0, 4i},
 	{"-1.2+4.2i", false, false, false, true, 0, 0, 0, -1.2 + 4.2i},
 	{"073i", false, false, false, true, 0, 0, 0, 73i}, // not octal!
@@ -69,13 +81,14 @@ var numberTests = []numberTest{
 	{text: "1+2."},
 	{text: "'x"},
 	{text: "'xx'"},
+	{text: "'433937734937734969526500969526500'"}, // Integer too large - issue 10634.
 	// Issue 8622 - 0xe parsed as floating point. Very embarrassing.
 	{"0xef", true, true, true, false, 0xef, 0xef, 0xef, 0},
 }
 
 func TestNumberParse(t *testing.T) {
 	for _, test := range numberTests {
-		// If fmt.Sscan thinks it's complex, it's complex.  We can't trust the output
+		// If fmt.Sscan thinks it's complex, it's complex. We can't trust the output
 		// because imaginary comes out as a number.
 		var c complex128
 		typ := itemNumber
@@ -227,9 +240,22 @@ var parseTests = []parseTest{
 		`{{with .X}}"hello"{{end}}`},
 	{"with with else", "{{with .X}}hello{{else}}goodbye{{end}}", noError,
 		`{{with .X}}"hello"{{else}}"goodbye"{{end}}`},
+	// Trimming spaces.
+	{"trim left", "x \r\n\t{{- 3}}", noError, `"x"{{3}}`},
+	{"trim right", "{{3 -}}\n\n\ty", noError, `{{3}}"y"`},
+	{"trim left and right", "x \r\n\t{{- 3 -}}\n\n\ty", noError, `"x"{{3}}"y"`},
+	{"trim with extra spaces", "x\n{{-  3   -}}\ny", noError, `"x"{{3}}"y"`},
+	{"comment trim left", "x \r\n\t{{- /* hi */}}", noError, `"x"`},
+	{"comment trim right", "{{/* hi */ -}}\n\n\ty", noError, `"y"`},
+	{"comment trim left and right", "x \r\n\t{{- /* */ -}}\n\n\ty", noError, `"x""y"`},
+	{"block definition", `{{block "foo" .}}hello{{end}}`, noError,
+		`{{template "foo" .}}`},
 	// Errors.
 	{"unclosed action", "hello{{range", hasError, ""},
 	{"unmatched end", "{{end}}", hasError, ""},
+	{"unmatched else", "{{else}}", hasError, ""},
+	{"unmatched else after if", "{{if .X}}hello{{end}}{{else}}", hasError, ""},
+	{"multiple else", "{{if .X}}1{{else}}2{{else}}3{{end}}", hasError, ""},
 	{"missing end", "hello{{range .x}}", hasError, ""},
 	{"missing end after else", "hello{{range .x}}{{else}}", hasError, ""},
 	{"undefined function", "hello{{undefined}}", hasError, ""},
@@ -246,9 +272,9 @@ var parseTests = []parseTest{
 	{"adjacent args", "{{printf 3`x`}}", hasError, ""},
 	{"adjacent args with .", "{{printf `x`.}}", hasError, ""},
 	{"extra end after if", "{{if .X}}a{{else if .Y}}b{{end}}{{end}}", hasError, ""},
-	// Equals (and other chars) do not assignments make (yet).
+	// Other kinds of assignments and operators aren't available yet.
 	{"bug0a", "{{$x := 0}}{{$x}}", noError, "{{$x := 0}}{{$x}}"},
-	{"bug0b", "{{$x = 1}}{{$x}}", hasError, ""},
+	{"bug0b", "{{$x += 1}}{{$x}}", hasError, ""},
 	{"bug0c", "{{$x ! 2}}{{$x}}", hasError, ""},
 	{"bug0d", "{{$x % 3}}{{$x}}", hasError, ""},
 	// Check the parse fails for := rather than comma.
@@ -257,10 +283,29 @@ var parseTests = []parseTest{
 	{"bug1a", "{{$x:=.}}{{$x!2}}", hasError, ""},                     // ! is just illegal here.
 	{"bug1b", "{{$x:=.}}{{$x+2}}", hasError, ""},                     // $x+2 should not parse as ($x) (+2).
 	{"bug1c", "{{$x:=.}}{{$x +2}}", noError, "{{$x := .}}{{$x +2}}"}, // It's OK with a space.
+	// dot following a literal value
+	{"dot after integer", "{{1.E}}", hasError, ""},
+	{"dot after float", "{{0.1.E}}", hasError, ""},
+	{"dot after boolean", "{{true.E}}", hasError, ""},
+	{"dot after char", "{{'a'.any}}", hasError, ""},
+	{"dot after string", `{{"hello".guys}}`, hasError, ""},
+	{"dot after dot", "{{..E}}", hasError, ""},
+	{"dot after nil", "{{nil.E}}", hasError, ""},
+	// Wrong pipeline
+	{"wrong pipeline dot", "{{12|.}}", hasError, ""},
+	{"wrong pipeline number", "{{.|12|printf}}", hasError, ""},
+	{"wrong pipeline string", "{{.|printf|\"error\"}}", hasError, ""},
+	{"wrong pipeline char", "{{12|printf|'e'}}", hasError, ""},
+	{"wrong pipeline boolean", "{{.|true}}", hasError, ""},
+	{"wrong pipeline nil", "{{'c'|nil}}", hasError, ""},
+	{"empty pipeline", `{{printf "%d" ( ) }}`, hasError, ""},
+	// Missing pipeline in block
+	{"block definition", `{{block "foo"}}hello{{end}}`, hasError, ""},
 }
 
 var builtins = map[string]interface{}{
-	"printf": fmt.Sprintf,
+	"printf":   fmt.Sprintf,
+	"contains": strings.Contains,
 }
 
 func testParse(doCopy bool, t *testing.T) {
@@ -375,7 +420,7 @@ var errorTests = []parseTest{
 		hasError, `unexpected ")"`},
 	{"space",
 		"{{`x`3}}",
-		hasError, `missing space?`},
+		hasError, `in operand`},
 	{"idchar",
 		"{{a#}}",
 		hasError, `'#'`},
@@ -407,17 +452,154 @@ var errorTests = []parseTest{
 	{"undefvar",
 		"{{$a}}",
 		hasError, `undefined variable`},
+	{"wrongdot",
+		"{{true.any}}",
+		hasError, `unexpected . after term`},
+	{"wrongpipeline",
+		"{{12|false}}",
+		hasError, `non executable command in pipeline`},
+	{"emptypipeline",
+		`{{ ( ) }}`,
+		hasError, `missing value for parenthesized pipeline`},
+	{"multilinerawstring",
+		"{{ $v := `\n` }} {{",
+		hasError, `multilinerawstring:2: unexpected unclosed action`},
+	{"rangeundefvar",
+		"{{range $k}}{{end}}",
+		hasError, `undefined variable`},
+	{"rangeundefvars",
+		"{{range $k, $v}}{{end}}",
+		hasError, `undefined variable`},
+	{"rangemissingvalue1",
+		"{{range $k,}}{{end}}",
+		hasError, `missing value for range`},
+	{"rangemissingvalue2",
+		"{{range $k, $v := }}{{end}}",
+		hasError, `missing value for range`},
+	{"rangenotvariable1",
+		"{{range $k, .}}{{end}}",
+		hasError, `range can only initialize variables`},
+	{"rangenotvariable2",
+		"{{range $k, 123 := .}}{{end}}",
+		hasError, `range can only initialize variables`},
 }
 
 func TestErrors(t *testing.T) {
 	for _, test := range errorTests {
-		_, err := New(test.name).Parse(test.input, "", "", make(map[string]*Tree))
-		if err == nil {
-			t.Errorf("%q: expected error", test.name)
-			continue
+		t.Run(test.name, func(t *testing.T) {
+			_, err := New(test.name).Parse(test.input, "", "", make(map[string]*Tree))
+			if err == nil {
+				t.Fatalf("expected error %q, got nil", test.result)
+			}
+			if !strings.Contains(err.Error(), test.result) {
+				t.Fatalf("error %q does not contain %q", err, test.result)
+			}
+		})
+	}
+}
+
+func TestBlock(t *testing.T) {
+	const (
+		input = `a{{block "inner" .}}bar{{.}}baz{{end}}b`
+		outer = `a{{template "inner" .}}b`
+		inner = `bar{{.}}baz`
+	)
+	treeSet := make(map[string]*Tree)
+	tmpl, err := New("outer").Parse(input, "", "", treeSet, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g, w := tmpl.Root.String(), outer; g != w {
+		t.Errorf("outer template = %q, want %q", g, w)
+	}
+	inTmpl := treeSet["inner"]
+	if inTmpl == nil {
+		t.Fatal("block did not define template")
+	}
+	if g, w := inTmpl.Root.String(), inner; g != w {
+		t.Errorf("inner template = %q, want %q", g, w)
+	}
+}
+
+func TestLineNum(t *testing.T) {
+	const count = 100
+	text := strings.Repeat("{{printf 1234}}\n", count)
+	tree, err := New("bench").Parse(text, "", "", make(map[string]*Tree), builtins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Check the line numbers. Each line is an action containing a template, followed by text.
+	// That's two nodes per line.
+	nodes := tree.Root.Nodes
+	for i := 0; i < len(nodes); i += 2 {
+		line := 1 + i/2
+		// Action first.
+		action := nodes[i].(*ActionNode)
+		if action.Line != line {
+			t.Fatalf("line %d: action is line %d", line, action.Line)
 		}
-		if !strings.Contains(err.Error(), test.result) {
-			t.Errorf("%q: error %q does not contain %q", test.name, err, test.result)
+		pipe := action.Pipe
+		if pipe.Line != line {
+			t.Fatalf("line %d: pipe is line %d", line, pipe.Line)
 		}
+	}
+}
+
+func BenchmarkParseLarge(b *testing.B) {
+	text := strings.Repeat("{{1234}}\n", 10000)
+	for i := 0; i < b.N; i++ {
+		_, err := New("bench").Parse(text, "", "", make(map[string]*Tree), builtins)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+var sinkv, sinkl string
+
+func BenchmarkVariableString(b *testing.B) {
+	v := &VariableNode{
+		Ident: []string{"$", "A", "BB", "CCC", "THIS_IS_THE_VARIABLE_BEING_PROCESSED"},
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		sinkv = v.String()
+	}
+	if sinkv == "" {
+		b.Fatal("Benchmark was not run")
+	}
+}
+
+func BenchmarkListString(b *testing.B) {
+	text := `
+{{(printf .Field1.Field2.Field3).Value}}
+{{$x := (printf .Field1.Field2.Field3).Value}}
+{{$y := (printf $x.Field1.Field2.Field3).Value}}
+{{$z := $y.Field1.Field2.Field3}}
+{{if contains $y $z}}
+	{{printf "%q" $y}}
+{{else}}
+	{{printf "%q" $x}}
+{{end}}
+{{with $z.Field1 | contains "boring"}}
+	{{printf "%q" . | printf "%s"}}
+{{else}}
+	{{printf "%d %d %d" 11 11 11}}
+	{{printf "%d %d %s" 22 22 $x.Field1.Field2.Field3 | printf "%s"}}
+	{{printf "%v" (contains $z.Field1.Field2 $y)}}
+{{end}}
+`
+	tree, err := New("bench").Parse(text, "", "", make(map[string]*Tree), builtins)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		sinkl = tree.Root.String()
+	}
+	if sinkl == "" {
+		b.Fatal("Benchmark was not run")
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -276,7 +276,7 @@ CodewalkViewer.prototype.changeSelectedComment = function(target) {
   }
 
   // Force original file even if user hasn't changed comments since they may
-  // have nagivated away from it within the iframe without us knowing.
+  // have navigated away from it within the iframe without us knowing.
   this.navigateToCode(currentFile);
 };
 

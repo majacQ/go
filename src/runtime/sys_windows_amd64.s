@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-#include "zasm_GOOS_GOARCH.h"
+#include "go_asm.h"
+#include "go_tls.h"
 #include "textflag.h"
 
 // maxargs should be divisible by 2, as Windows stack
@@ -10,7 +11,7 @@
 #define maxargs 16
 
 // void runtime·asmstdcall(void *c);
-TEXT runtime·asmstdcall(SB),NOSPLIT,$0
+TEXT runtime·asmstdcall(SB),NOSPLIT|NOFRAME,$0
 	// asmcgocall will put first argument into CX.
 	PUSHQ	CX			// save for later
 	MOVQ	libcall_fn(CX), AX
@@ -44,6 +45,14 @@ loadregs:
 	MOVQ	8(SI), DX
 	MOVQ	16(SI), R8
 	MOVQ	24(SI), R9
+	// Floating point arguments are passed in the XMM
+	// registers. Set them here in case any of the arguments
+	// are floating point values. For details see
+	//	https://msdn.microsoft.com/en-us/library/zthk2dkh.aspx
+	MOVQ	CX, X0
+	MOVQ	DX, X1
+	MOVQ	R8, X2
+	MOVQ	R9, X3
 
 	// Call stdcall function.
 	CALL	AX
@@ -53,6 +62,10 @@ loadregs:
 	// Return result.
 	POPQ	CX
 	MOVQ	AX, libcall_r1(CX)
+	// Floating point return values are returned in XMM0. Setting r2 to this
+	// value in case this call returned a floating point value. For details,
+	// see https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention
+	MOVQ    X0, libcall_r2(CX)
 
 	// GetLastError().
 	MOVQ	0x30(GS), DI
@@ -61,11 +74,11 @@ loadregs:
 
 	RET
 
-TEXT runtime·badsignal2(SB),NOSPLIT,$48
+TEXT runtime·badsignal2(SB),NOSPLIT|NOFRAME,$48
 	// stderr
 	MOVQ	$-12, CX // stderr
 	MOVQ	CX, 0(SP)
-	MOVQ	runtime·GetStdHandle(SB), AX
+	MOVQ	runtime·_GetStdHandle(SB), AX
 	CALL	AX
 
 	MOVQ	AX, CX	// handle
@@ -78,9 +91,9 @@ TEXT runtime·badsignal2(SB),NOSPLIT,$48
 	MOVQ	$0, 0(R9)
 	MOVQ	R9, 24(SP)
 	MOVQ	$0, 32(SP)	// overlapped
-	MOVQ	runtime·WriteFile(SB), AX
+	MOVQ	runtime·_WriteFile(SB), AX
 	CALL	AX
-	
+
 	RET
 
 // faster get/set last error
@@ -101,7 +114,7 @@ TEXT runtime·setlasterror(SB),NOSPLIT,$0
 // exception record and context pointers.
 // Handler function is stored in AX.
 // Return 0 for 'not handled', -1 for handled.
-TEXT runtime·sigtramp(SB),NOSPLIT,$0-0
+TEXT sigtramp<>(SB),NOSPLIT|NOFRAME,$0-0
 	// CX: PEXCEPTION_POINTERS ExceptionInfo
 
 	// DI SI BP BX R12 R13 R14 R15 registers and DF flag are preserved
@@ -189,32 +202,32 @@ done:
 
 	RET
 
-TEXT runtime·exceptiontramp(SB),NOSPLIT,$0
+TEXT runtime·exceptiontramp(SB),NOSPLIT|NOFRAME,$0
 	MOVQ	$runtime·exceptionhandler(SB), AX
-	JMP	runtime·sigtramp(SB)
+	JMP	sigtramp<>(SB)
 
-TEXT runtime·firstcontinuetramp(SB),NOSPLIT,$0-0
+TEXT runtime·firstcontinuetramp(SB),NOSPLIT|NOFRAME,$0-0
 	MOVQ	$runtime·firstcontinuehandler(SB), AX
-	JMP	runtime·sigtramp(SB)
+	JMP	sigtramp<>(SB)
 
-TEXT runtime·lastcontinuetramp(SB),NOSPLIT,$0-0
+TEXT runtime·lastcontinuetramp(SB),NOSPLIT|NOFRAME,$0-0
 	MOVQ	$runtime·lastcontinuehandler(SB), AX
-	JMP	runtime·sigtramp(SB)
+	JMP	sigtramp<>(SB)
 
-TEXT runtime·ctrlhandler(SB),NOSPLIT,$8
+TEXT runtime·ctrlhandler(SB),NOSPLIT|NOFRAME,$8
 	MOVQ	CX, 16(SP)		// spill
 	MOVQ	$runtime·ctrlhandler1(SB), CX
 	MOVQ	CX, 0(SP)
 	CALL	runtime·externalthreadhandler(SB)
 	RET
 
-TEXT runtime·profileloop(SB),NOSPLIT,$8
+TEXT runtime·profileloop(SB),NOSPLIT|NOFRAME,$8
 	MOVQ	$runtime·profileloop1(SB), CX
 	MOVQ	CX, 0(SP)
 	CALL	runtime·externalthreadhandler(SB)
 	RET
 
-TEXT runtime·externalthreadhandler(SB),NOSPLIT,$0
+TEXT runtime·externalthreadhandler(SB),NOSPLIT|NOFRAME,$0
 	PUSHQ	BP
 	MOVQ	SP, BP
 	PUSHQ	BX
@@ -224,34 +237,36 @@ TEXT runtime·externalthreadhandler(SB),NOSPLIT,$0
 	MOVQ	SP, DX
 
 	// setup dummy m, g
-	SUBQ	$m_end, SP		// space for M
+	SUBQ	$m__size, SP		// space for M
 	MOVQ	SP, 0(SP)
-	MOVQ	$m_end, 8(SP)
-	CALL	runtime·memclr(SB)	// smashes AX,BX,CX
+	MOVQ	$m__size, 8(SP)
+	CALL	runtime·memclrNoHeapPointers(SB)	// smashes AX,BX,CX, maybe BP
 
 	LEAQ	m_tls(SP), CX
 	MOVQ	CX, 0x28(GS)
 	MOVQ	SP, BX
-	SUBQ	$g_end, SP		// space for G
+	SUBQ	$g__size, SP		// space for G
 	MOVQ	SP, g(CX)
 	MOVQ	SP, m_g0(BX)
 
 	MOVQ	SP, 0(SP)
-	MOVQ	$g_end, 8(SP)
-	CALL	runtime·memclr(SB)	// smashes AX,BX,CX
-	LEAQ	g_end(SP), BX
+	MOVQ	$g__size, 8(SP)
+	CALL	runtime·memclrNoHeapPointers(SB)	// smashes AX,BX,CX, maybe BP
+	LEAQ	g__size(SP), BX
 	MOVQ	BX, g_m(SP)
 
-	LEAQ	-8192(SP), CX
+	LEAQ	-32768(SP), CX		// must be less than SizeOfStackReserve set by linker
 	MOVQ	CX, (g_stack+stack_lo)(SP)
-	ADDQ	$const_StackGuard, CX
+	ADDQ	$const__StackGuard, CX
 	MOVQ	CX, g_stackguard0(SP)
 	MOVQ	CX, g_stackguard1(SP)
 	MOVQ	DX, (g_stack+stack_hi)(SP)
 
+	PUSHQ	AX			// room for return value
 	PUSHQ	32(BP)			// arg for handler
 	CALL	16(BP)
 	POPQ	CX
+	POPQ	AX			// pass return value to Windows in AX
 
 	get_tls(CX)
 	MOVQ	g(CX), CX
@@ -286,15 +301,15 @@ TEXT runtime·callbackasm1(SB),NOSPLIT,$0
 	SUBQ	DX, AX
 	MOVQ	$0, DX
 	MOVQ	$5, CX	// divide by 5 because each call instruction in runtime·callbacks is 5 bytes long
-	DIVL	CX,
+	DIVL	CX
 
 	// find correspondent runtime·cbctxts table entry
 	MOVQ	runtime·cbctxts(SB), CX
 	MOVQ	-8(CX)(AX*8), AX
 
 	// extract callback context
-	MOVQ	cbctxt_argsize(AX), DX
-	MOVQ	cbctxt_gobody(AX), AX
+	MOVQ	wincallbackcontext_argsize(AX), DX
+	MOVQ	wincallbackcontext_gobody(AX), AX
 
 	// preserve whatever's at the memory location that
 	// the callback will use to store the return value
@@ -340,7 +355,7 @@ TEXT runtime·callbackasm1(SB),NOSPLIT,$0
 	ADDQ	$64, SP
 	POPFQ
 
-	MOVL	-8(CX)(DX*1), AX  // return value
+	MOVQ	-8(CX)(DX*1), AX  // return value
 	POPQ	-8(CX)(DX*1)      // restore bytes just after the args
 	RET
 
@@ -352,9 +367,9 @@ TEXT runtime·tstart_stdcall(SB),NOSPLIT,$0
 	// Layout new m scheduler stack on os stack.
 	MOVQ	SP, AX
 	MOVQ	AX, (g_stack+stack_hi)(DX)
-	SUBQ	$(64*1024), AX		// stack size
+	SUBQ	$(64*1024), AX		// initial stack size (adjusted later)
 	MOVQ	AX, (g_stack+stack_lo)(DX)
-	ADDQ	$const_StackGuard, AX
+	ADDQ	$const__StackGuard, AX
 	MOVQ	AX, g_stackguard0(DX)
 	MOVQ	AX, g_stackguard1(DX)
 
@@ -378,10 +393,10 @@ TEXT runtime·settls(SB),NOSPLIT,$0
 	MOVQ	DI, 0x28(GS)
 	RET
 
-// Sleep duration is in 100ns units.
-TEXT runtime·usleep1(SB),NOSPLIT,$0
-	MOVL	usec+0(FP), BX
-	MOVQ	$runtime·usleep2(SB), AX // to hide from 6l
+// func onosstack(fn unsafe.Pointer, arg uint32)
+TEXT runtime·onosstack(SB),NOSPLIT,$0
+	MOVQ	fn+0(FP), AX		// to hide from 6l
+	MOVL	arg+8(FP), BX
 
 	// Execute call on m->g0 stack, in case we are not actually
 	// calling a system call wrapper, like when running under WINE.
@@ -402,7 +417,7 @@ TEXT runtime·usleep1(SB),NOSPLIT,$0
 	MOVQ	R12, m_libcallg(R13)
 	// sp must be the last, because once async cpu profiler finds
 	// all three values to be non-zero, it will use them
-	LEAQ	usec+0(FP), R12
+	LEAQ	fn+0(FP), R12
 	MOVQ	R12, m_libcallsp(R13)
 
 	MOVQ	m_g0(R13), R14
@@ -425,25 +440,89 @@ ret:
 	RET
 
 // Runs on OS stack. duration (in 100ns units) is in BX.
-TEXT runtime·usleep2(SB),NOSPLIT,$16
+// The function leaves room for 4 syscall parameters
+// (as per windows amd64 calling convention).
+TEXT runtime·usleep2(SB),NOSPLIT|NOFRAME,$48
 	MOVQ	SP, AX
 	ANDQ	$~15, SP	// alignment as per Windows requirement
-	MOVQ	AX, 8(SP)
+	MOVQ	AX, 40(SP)
 	// Want negative 100ns units.
 	NEGQ	BX
-	MOVQ	SP, R8 // ptime
+	LEAQ	32(SP), R8  // ptime
 	MOVQ	BX, (R8)
 	MOVQ	$-1, CX // handle
 	MOVQ	$0, DX // alertable
-	MOVQ	runtime·NtWaitForSingleObject(SB), AX
+	MOVQ	runtime·_NtWaitForSingleObject(SB), AX
 	CALL	AX
-	MOVQ	8(SP), SP
+	MOVQ	40(SP), SP
 	RET
 
-// func now() (sec int64, nsec int32)
-TEXT time·now(SB),NOSPLIT,$8-12
-	CALL	runtime·unixnano(SB)
-	MOVQ	0(SP), AX
+// Runs on OS stack.
+TEXT runtime·switchtothread(SB),NOSPLIT|NOFRAME,$0
+	MOVQ	SP, AX
+	ANDQ	$~15, SP	// alignment as per Windows requirement
+	SUBQ	$(48), SP	// room for SP and 4 args as per Windows requirement
+				// plus one extra word to keep stack 16 bytes aligned
+	MOVQ	AX, 32(SP)
+	MOVQ	runtime·_SwitchToThread(SB), AX
+	CALL	AX
+	MOVQ	32(SP), SP
+	RET
+
+// See https://www.dcl.hpi.uni-potsdam.de/research/WRK/2007/08/getting-os-information-the-kuser_shared_data-structure/
+// Must read hi1, then lo, then hi2. The snapshot is valid if hi1 == hi2.
+#define _INTERRUPT_TIME 0x7ffe0008
+#define _SYSTEM_TIME 0x7ffe0014
+#define time_lo 0
+#define time_hi1 4
+#define time_hi2 8
+
+TEXT runtime·nanotime1(SB),NOSPLIT,$0-8
+	CMPB	runtime·useQPCTime(SB), $0
+	JNE	useQPC
+	MOVQ	$_INTERRUPT_TIME, DI
+loop:
+	MOVL	time_hi1(DI), AX
+	MOVL	time_lo(DI), BX
+	MOVL	time_hi2(DI), CX
+	CMPL	AX, CX
+	JNE	loop
+	SHLQ	$32, CX
+	ORQ	BX, CX
+	IMULQ	$100, CX
+	MOVQ	CX, ret+0(FP)
+	RET
+useQPC:
+	JMP	runtime·nanotimeQPC(SB)
+	RET
+
+TEXT time·now(SB),NOSPLIT,$0-24
+	CMPB	runtime·useQPCTime(SB), $0
+	JNE	useQPC
+	MOVQ	$_INTERRUPT_TIME, DI
+loop:
+	MOVL	time_hi1(DI), AX
+	MOVL	time_lo(DI), BX
+	MOVL	time_hi2(DI), CX
+	CMPL	AX, CX
+	JNE	loop
+	SHLQ	$32, AX
+	ORQ	BX, AX
+	IMULQ	$100, AX
+	MOVQ	AX, mono+16(FP)
+
+	MOVQ	$_SYSTEM_TIME, DI
+wall:
+	MOVL	time_hi1(DI), AX
+	MOVL	time_lo(DI), BX
+	MOVL	time_hi2(DI), CX
+	CMPL	AX, CX
+	JNE	wall
+	SHLQ	$32, AX
+	ORQ	BX, AX
+	MOVQ	$116444736000000000, DI
+	SUBQ	DI, AX
+	IMULQ	$100, AX
 
 	// generated code for
 	//	func f(x uint64) (uint64, uint64) { return x/1000000000, x%100000000 }
@@ -459,4 +538,6 @@ TEXT time·now(SB),NOSPLIT,$8-12
 	SUBQ	DX, CX
 	MOVL	CX, nsec+8(FP)
 	RET
-
+useQPC:
+	JMP	runtime·nowQPC(SB)
+	RET

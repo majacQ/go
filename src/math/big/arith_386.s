@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// +build !math_big_pure_go
+
 #include "textflag.h"
 
 // This file provides fast assembly versions for the elementary
@@ -37,15 +39,16 @@ TEXT ·addVV(SB),NOSPLIT,$0
 	JMP E1
 
 L1:	MOVL (SI)(BX*4), AX
-	RCRL $1, DX
+	ADDL DX, DX		// restore CF
 	ADCL (CX)(BX*4), AX
-	RCLL $1, DX
+	SBBL DX, DX		// save CF
 	MOVL AX, (DI)(BX*4)
 	ADDL $1, BX		// i++
 
 E1:	CMPL BX, BP		// i < n
 	JL L1
 
+	NEGL DX
 	MOVL DX, c+36(FP)
 	RET
 
@@ -62,15 +65,16 @@ TEXT ·subVV(SB),NOSPLIT,$0
 	JMP E2
 
 L2:	MOVL (SI)(BX*4), AX
-	RCRL $1, DX
+	ADDL DX, DX		// restore CF
 	SBBL (CX)(BX*4), AX
-	RCLL $1, DX
+	SBBL DX, DX		// save CF
 	MOVL AX, (DI)(BX*4)
 	ADDL $1, BX		// i++
 
 E2:	CMPL BX, BP		// i < n
 	JL L2
 
+	NEGL DX
 	MOVL DX, c+36(FP)
 	RET
 
@@ -86,8 +90,8 @@ TEXT ·addVW(SB),NOSPLIT,$0
 
 L3:	ADDL (SI)(BX*4), AX
 	MOVL AX, (DI)(BX*4)
-	RCLL $1, AX
-	ANDL $1, AX
+	SBBL AX, AX		// save CF
+	NEGL AX
 	ADDL $1, BX		// i++
 
 E3:	CMPL BX, BP		// i < n
@@ -106,11 +110,11 @@ TEXT ·subVW(SB),NOSPLIT,$0
 	MOVL $0, BX		// i = 0
 	JMP E4
 
-L4:	MOVL (SI)(BX*4), DX	// TODO(gri) is there a reverse SUBL?
+L4:	MOVL (SI)(BX*4), DX
 	SUBL AX, DX
 	MOVL DX, (DI)(BX*4)
-	RCLL $1, AX
-	ANDL $1, AX
+	SBBL AX, AX		// save CF
+	NEGL AX
 	ADDL $1, BX		// i++
 
 E4:	CMPL BX, BP		// i < n
@@ -132,7 +136,7 @@ TEXT ·shlVU(SB),NOSPLIT,$0
 	MOVL s+24(FP), CX
 	MOVL (SI)(BX*4), AX	// w1 = x[n-1]
 	MOVL $0, DX
-	SHLL CX, DX:AX		// w1>>ŝ
+	SHLL CX, AX, DX		// w1>>ŝ
 	MOVL DX, c+28(FP)
 
 	CMPL BX, $0
@@ -141,7 +145,7 @@ TEXT ·shlVU(SB),NOSPLIT,$0
 	// i > 0
 L8:	MOVL AX, DX		// w = w1
 	MOVL -4(SI)(BX*4), AX	// w1 = x[i-1]
-	SHLL CX, DX:AX		// w<<s | w1>>ŝ
+	SHLL CX, AX, DX		// w<<s | w1>>ŝ
 	MOVL DX, (DI)(BX*4)	// z[i] = w<<s | w1>>ŝ
 	SUBL $1, BX		// i--
 	JG L8			// i > 0
@@ -167,7 +171,7 @@ TEXT ·shrVU(SB),NOSPLIT,$0
 	MOVL s+24(FP), CX
 	MOVL (SI), AX		// w1 = x[0]
 	MOVL $0, DX
-	SHRL CX, DX:AX		// w1<<ŝ
+	SHRL CX, AX, DX		// w1<<ŝ
 	MOVL DX, c+28(FP)
 
 	MOVL $0, BX		// i = 0
@@ -176,10 +180,10 @@ TEXT ·shrVU(SB),NOSPLIT,$0
 	// i < n-1
 L9:	MOVL AX, DX		// w = w1
 	MOVL 4(SI)(BX*4), AX	// w1 = x[i+1]
-	SHRL CX, DX:AX		// w>>s | w1<<ŝ
+	SHRL CX, AX, DX		// w>>s | w1<<ŝ
 	MOVL DX, (DI)(BX*4)	// z[i] = w>>s | w1<<ŝ
 	ADDL $1, BX		// i++
-	
+
 E9:	CMPL BX, BP
 	JL L9			// i < n-1
 
@@ -264,15 +268,4 @@ E7:	SUBL $1, BX		// i--
 	JGE L7			// i >= 0
 
 	MOVL DX, r+32(FP)
-	RET
-
-// func bitLen(x Word) (n int)
-TEXT ·bitLen(SB),NOSPLIT,$0
-	BSRL x+0(FP), AX
-	JZ Z1
-	INCL AX
-	MOVL AX, n+4(FP)
-	RET
-
-Z1:	MOVL $0, n+4(FP)
 	RET

@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"crypto"
-	_ "crypto/md5"
 	"crypto/rand"
 	"crypto/sha1"
 	_ "crypto/sha256"
@@ -103,7 +102,7 @@ func TestPSSGolden(t *testing.T) {
 			switch {
 			case len(line) == 0:
 				if len(partialValue) > 0 {
-					values <- strings.Replace(partialValue, " ", "", -1)
+					values <- strings.ReplaceAll(partialValue, " ", "")
 					partialValue = ""
 					lastWasValue = true
 				}
@@ -189,6 +188,15 @@ func TestPSSOpenSSL(t *testing.T) {
 	}
 }
 
+func TestPSSNilOpts(t *testing.T) {
+	hash := crypto.SHA256
+	h := hash.New()
+	h.Write([]byte("testing"))
+	hashed := h.Sum(nil)
+
+	SignPSS(rand.Reader, rsaPrivateKey, hash, hashed, nil)
+}
+
 func TestPSSSigning(t *testing.T) {
 	var saltLengthCombinations = []struct {
 		signSaltLength, verifySaltLength int
@@ -202,7 +210,7 @@ func TestPSSSigning(t *testing.T) {
 		{8, 8, true},
 	}
 
-	hash := crypto.MD5
+	hash := crypto.SHA1
 	h := hash.New()
 	h.Write([]byte("testing"))
 	hashed := h.Sum(nil)

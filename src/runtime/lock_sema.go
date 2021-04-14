@@ -1,27 +1,28 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin nacl netbsd openbsd plan9 solaris windows
+// +build aix darwin netbsd openbsd plan9 solaris windows
 
 package runtime
 
-import "unsafe"
+import (
+	"runtime/internal/atomic"
+	"unsafe"
+)
 
 // This implementation depends on OS-specific implementations of
 //
-//	uintptr runtime·semacreate(void)
-//		Create a semaphore, which will be assigned to m->waitsema.
-//		The zero value is treated as absence of any semaphore,
-//		so be sure to return a non-zero value.
+//	func semacreate(mp *m)
+//		Create a semaphore for mp, if it does not already have one.
 //
-//	int32 runtime·semasleep(int64 ns)
-//		If ns < 0, acquire m->waitsema and return 0.
-//		If ns >= 0, try to acquire m->waitsema for at most ns nanoseconds.
+//	func semasleep(ns int64) int32
+//		If ns < 0, acquire m's semaphore and return 0.
+//		If ns >= 0, try to acquire m's semaphore for at most ns nanoseconds.
 //		Return 0 if the semaphore was acquired, -1 if interrupted or timed out.
 //
-//	int32 runtime·semawakeup(M *mp)
-//		Wake up mp, which is or will soon be sleeping on mp->waitsema.
+//	func semawakeup(mp *m)
+//		Wake up mp, which is or will soon be sleeping on its semaphore.
 //
 const (
 	locked uintptr = 1
@@ -31,24 +32,22 @@ const (
 	passive_spin    = 1
 )
 
-func semacreate() uintptr
-func semasleep(int64) int32
-func semawakeup(mp *m)
-
 func lock(l *mutex) {
+	lockWithRank(l, getLockRank(l))
+}
+
+func lock2(l *mutex) {
 	gp := getg()
 	if gp.m.locks < 0 {
-		gothrow("runtime·lock: lock count")
+		throw("runtime·lock: lock count")
 	}
 	gp.m.locks++
 
 	// Speculative grab for lock.
-	if casuintptr(&l.key, 0, locked) {
+	if atomic.Casuintptr(&l.key, 0, locked) {
 		return
 	}
-	if gp.m.waitsema == 0 {
-		gp.m.waitsema = semacreate()
-	}
+	semacreate(gp.m)
 
 	// On uniprocessor's, no point spinning.
 	// On multiprocessors, spin for ACTIVE_SPIN attempts.
@@ -58,10 +57,10 @@ func lock(l *mutex) {
 	}
 Loop:
 	for i := 0; ; i++ {
-		v := atomicloaduintptr(&l.key)
+		v := atomic.Loaduintptr(&l.key)
 		if v&locked == 0 {
 			// Unlocked. Try to lock.
-			if casuintptr(&l.key, v, v|locked) {
+			if atomic.Casuintptr(&l.key, v, v|locked) {
 				return
 			}
 			i = 0
@@ -76,17 +75,17 @@ Loop:
 			// for this lock, chained through m->nextwaitm.
 			// Queue this M.
 			for {
-				gp.m.nextwaitm = (*m)((unsafe.Pointer)(v &^ locked))
-				if casuintptr(&l.key, v, uintptr(unsafe.Pointer(gp.m))|locked) {
+				gp.m.nextwaitm = muintptr(v &^ locked)
+				if atomic.Casuintptr(&l.key, v, uintptr(unsafe.Pointer(gp.m))|locked) {
 					break
 				}
-				v = atomicloaduintptr(&l.key)
+				v = atomic.Loaduintptr(&l.key)
 				if v&locked == 0 {
 					continue Loop
 				}
 			}
 			if v&locked != 0 {
-				// Queued.  Wait.
+				// Queued. Wait.
 				semasleep(-1)
 				i = 0
 			}
@@ -95,19 +94,25 @@ Loop:
 }
 
 func unlock(l *mutex) {
+	unlockWithRank(l)
+}
+
+//go:nowritebarrier
+// We might not be holding a p in this code.
+func unlock2(l *mutex) {
 	gp := getg()
 	var mp *m
 	for {
-		v := atomicloaduintptr(&l.key)
+		v := atomic.Loaduintptr(&l.key)
 		if v == locked {
-			if casuintptr(&l.key, locked, 0) {
+			if atomic.Casuintptr(&l.key, locked, 0) {
 				break
 			}
 		} else {
 			// Other M's are waiting for the lock.
 			// Dequeue an M.
-			mp = (*m)((unsafe.Pointer)(v &^ locked))
-			if casuintptr(&l.key, v, uintptr(unsafe.Pointer(mp.nextwaitm))) {
+			mp = muintptr(v &^ locked).ptr()
+			if atomic.Casuintptr(&l.key, v, uintptr(mp.nextwaitm)) {
 				// Dequeued an M.  Wake it.
 				semawakeup(mp)
 				break
@@ -116,7 +121,7 @@ func unlock(l *mutex) {
 	}
 	gp.m.locks--
 	if gp.m.locks < 0 {
-		gothrow("runtime·unlock: lock count")
+		throw("runtime·unlock: lock count")
 	}
 	if gp.m.locks == 0 && gp.preempt { // restore the preemption request in case we've cleared it in newstack
 		gp.stackguard0 = stackPreempt
@@ -125,14 +130,20 @@ func unlock(l *mutex) {
 
 // One-time notifications.
 func noteclear(n *note) {
-	n.key = 0
+	if GOOS == "aix" {
+		// On AIX, semaphores might not synchronize the memory in some
+		// rare cases. See issue #30189.
+		atomic.Storeuintptr(&n.key, 0)
+	} else {
+		n.key = 0
+	}
 }
 
 func notewakeup(n *note) {
 	var v uintptr
 	for {
-		v = atomicloaduintptr(&n.key)
-		if casuintptr(&n.key, v, locked) {
+		v = atomic.Loaduintptr(&n.key)
+		if atomic.Casuintptr(&n.key, v, locked) {
 			break
 		}
 	}
@@ -143,10 +154,10 @@ func notewakeup(n *note) {
 	case v == 0:
 		// Nothing was waiting. Done.
 	case v == locked:
-		// Two notewakeups!  Not allowed.
-		gothrow("notewakeup - double wakeup")
+		// Two notewakeups! Not allowed.
+		throw("notewakeup - double wakeup")
 	default:
-		// Must be the waiting m.  Wake it up.
+		// Must be the waiting m. Wake it up.
 		semawakeup((*m)(unsafe.Pointer(v)))
 	}
 }
@@ -154,21 +165,28 @@ func notewakeup(n *note) {
 func notesleep(n *note) {
 	gp := getg()
 	if gp != gp.m.g0 {
-		gothrow("notesleep not on g0")
+		throw("notesleep not on g0")
 	}
-	if gp.m.waitsema == 0 {
-		gp.m.waitsema = semacreate()
-	}
-	if !casuintptr(&n.key, 0, uintptr(unsafe.Pointer(gp.m))) {
+	semacreate(gp.m)
+	if !atomic.Casuintptr(&n.key, 0, uintptr(unsafe.Pointer(gp.m))) {
 		// Must be locked (got wakeup).
 		if n.key != locked {
-			gothrow("notesleep - waitm out of sync")
+			throw("notesleep - waitm out of sync")
 		}
 		return
 	}
-	// Queued.  Sleep.
+	// Queued. Sleep.
 	gp.m.blocked = true
-	semasleep(-1)
+	if *cgo_yield == nil {
+		semasleep(-1)
+	} else {
+		// Sleep for an arbitrary-but-moderate interval to poll libc interceptors.
+		const ns = 10e6
+		for atomic.Loaduintptr(&n.key) == 0 {
+			semasleep(ns)
+			asmcgocall(*cgo_yield, nil)
+		}
+	}
 	gp.m.blocked = false
 }
 
@@ -181,50 +199,64 @@ func notetsleep_internal(n *note, ns int64, gp *g, deadline int64) bool {
 	gp = getg()
 
 	// Register for wakeup on n->waitm.
-	if !casuintptr(&n.key, 0, uintptr(unsafe.Pointer(gp.m))) {
+	if !atomic.Casuintptr(&n.key, 0, uintptr(unsafe.Pointer(gp.m))) {
 		// Must be locked (got wakeup).
 		if n.key != locked {
-			gothrow("notetsleep - waitm out of sync")
+			throw("notetsleep - waitm out of sync")
 		}
 		return true
 	}
 	if ns < 0 {
-		// Queued.  Sleep.
+		// Queued. Sleep.
 		gp.m.blocked = true
-		semasleep(-1)
+		if *cgo_yield == nil {
+			semasleep(-1)
+		} else {
+			// Sleep in arbitrary-but-moderate intervals to poll libc interceptors.
+			const ns = 10e6
+			for semasleep(ns) < 0 {
+				asmcgocall(*cgo_yield, nil)
+			}
+		}
 		gp.m.blocked = false
 		return true
 	}
 
 	deadline = nanotime() + ns
 	for {
-		// Registered.  Sleep.
+		// Registered. Sleep.
 		gp.m.blocked = true
+		if *cgo_yield != nil && ns > 10e6 {
+			ns = 10e6
+		}
 		if semasleep(ns) >= 0 {
 			gp.m.blocked = false
 			// Acquired semaphore, semawakeup unregistered us.
 			// Done.
 			return true
 		}
+		if *cgo_yield != nil {
+			asmcgocall(*cgo_yield, nil)
+		}
 		gp.m.blocked = false
-		// Interrupted or timed out.  Still registered.  Semaphore not acquired.
+		// Interrupted or timed out. Still registered. Semaphore not acquired.
 		ns = deadline - nanotime()
 		if ns <= 0 {
 			break
 		}
-		// Deadline hasn't arrived.  Keep sleeping.
+		// Deadline hasn't arrived. Keep sleeping.
 	}
 
-	// Deadline arrived.  Still registered.  Semaphore not acquired.
+	// Deadline arrived. Still registered. Semaphore not acquired.
 	// Want to give up and return, but have to unregister first,
 	// so that any notewakeup racing with the return does not
 	// try to grant us the semaphore when we don't expect it.
 	for {
-		v := atomicloaduintptr(&n.key)
+		v := atomic.Loaduintptr(&n.key)
 		switch v {
 		case uintptr(unsafe.Pointer(gp.m)):
 			// No wakeup yet; unregister if possible.
-			if casuintptr(&n.key, v, 0) {
+			if atomic.Casuintptr(&n.key, v, 0) {
 				return false
 			}
 		case locked:
@@ -232,24 +264,22 @@ func notetsleep_internal(n *note, ns int64, gp *g, deadline int64) bool {
 			// Grab it to avoid getting out of sync.
 			gp.m.blocked = true
 			if semasleep(-1) < 0 {
-				gothrow("runtime: unable to acquire - semaphore out of sync")
+				throw("runtime: unable to acquire - semaphore out of sync")
 			}
 			gp.m.blocked = false
 			return true
 		default:
-			gothrow("runtime: unexpected waitm - semaphore out of sync")
+			throw("runtime: unexpected waitm - semaphore out of sync")
 		}
 	}
 }
 
 func notetsleep(n *note, ns int64) bool {
 	gp := getg()
-	if gp != gp.m.g0 && gp.m.gcing == 0 {
-		gothrow("notetsleep not on g0")
+	if gp != gp.m.g0 {
+		throw("notetsleep not on g0")
 	}
-	if gp.m.waitsema == 0 {
-		gp.m.waitsema = semacreate()
-	}
+	semacreate(gp.m)
 	return notetsleep_internal(n, ns, nil, 0)
 }
 
@@ -258,13 +288,17 @@ func notetsleep(n *note, ns int64) bool {
 func notetsleepg(n *note, ns int64) bool {
 	gp := getg()
 	if gp == gp.m.g0 {
-		gothrow("notetsleepg on g0")
+		throw("notetsleepg on g0")
 	}
-	if gp.m.waitsema == 0 {
-		gp.m.waitsema = semacreate()
-	}
+	semacreate(gp.m)
 	entersyscallblock()
 	ok := notetsleep_internal(n, ns, nil, 0)
 	exitsyscall()
 	return ok
 }
+
+func beforeIdle(int64) (*g, bool) {
+	return nil, false
+}
+
+func checkTimeouts() {}

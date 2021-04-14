@@ -4,6 +4,11 @@
 
 // Package path implements utility routines for manipulating slash-separated
 // paths.
+//
+// The path package should only be used for paths separated by forward
+// slashes, such as the paths in URLs. This package does not deal with
+// Windows paths with drive letters or backslashes; to manipulate
+// operating system paths, use the path/filepath package.
 package path
 
 import (
@@ -48,7 +53,7 @@ func (b *lazybuf) string() string {
 }
 
 // Clean returns the shortest path name equivalent to path
-// by purely lexical processing.  It applies the following rules
+// by purely lexical processing. It applies the following rules
 // iteratively until no further processing can be done:
 //
 //	1. Replace multiple slashes with a single slash.
@@ -65,7 +70,7 @@ func (b *lazybuf) string() string {
 //
 // See also Rob Pike, ``Lexical File Names in Plan 9 or
 // Getting Dot-Dot Right,''
-// http://plan9.bell-labs.com/sys/doc/lexnames.html
+// https://9p.io/sys/doc/lexnames.html
 func Clean(path string) string {
 	if path == "" {
 		return "."
@@ -134,9 +139,9 @@ func Clean(path string) string {
 	return out.string()
 }
 
-// Split splits path immediately following the final slash.
+// Split splits path immediately following the final slash,
 // separating it into a directory and file name component.
-// If there is no slash path, Split returns an empty dir and
+// If there is no slash in path, Split returns an empty dir and
 // file set to path.
 // The returned values have the property that path = dir+file.
 func Split(path string) (dir, file string) {
@@ -144,9 +149,11 @@ func Split(path string) (dir, file string) {
 	return path[:i+1], path[i+1:]
 }
 
-// Join joins any number of path elements into a single path, adding a
-// separating slash if necessary. The result is Cleaned; in particular,
-// all empty strings are ignored.
+// Join joins any number of path elements into a single path,
+// separating them with slashes. Empty elements are ignored.
+// The result is Cleaned. However, if the argument list is
+// empty or all its elements are empty, Join returns
+// an empty string.
 func Join(elem ...string) string {
 	for i, e := range elem {
 		if e != "" {
@@ -192,7 +199,7 @@ func Base(path string) string {
 	return path
 }
 
-// IsAbs returns true if the path is absolute.
+// IsAbs reports whether the path is absolute.
 func IsAbs(path string) bool {
 	return len(path) > 0 && path[0] == '/'
 }

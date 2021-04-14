@@ -239,21 +239,23 @@ starts with the name being declared.
 </p>
 
 <pre>
-// Compile parses a regular expression and returns, if successful, a Regexp
-// object that can be used to match against text.
-func Compile(str string) (regexp *Regexp, err error) {
+// Compile parses a regular expression and returns, if successful,
+// a Regexp that can be used to match against text.
+func Compile(str string) (*Regexp, error) {
 </pre>
 
 <p>
-If the name always begins the comment, the output of <code>godoc</code>
-can usefully be run through <code>grep</code>.
+If every doc comment begins with the name of the item it describes,
+you can use the <a href="/cmd/go/#hdr-Show_documentation_for_package_or_symbol">doc</a>
+subcommand of the <a href="/cmd/go/">go</a> tool
+and run the output through <code>grep</code>.
 Imagine you couldn't remember the name "Compile" but were looking for
 the parsing function for regular expressions, so you ran
 the command,
 </p>
 
 <pre>
-$ godoc regexp | grep parse
+$ go doc -all regexp | grep -i parse
 </pre>
 
 <p>
@@ -264,10 +266,10 @@ which recalls the word you're looking for.
 </p>
 
 <pre>
-$ godoc regexp | grep parse
+$ go doc -all regexp | grep -i parse
     Compile parses a regular expression and returns, if successful, a Regexp
+    MustCompile is like Compile but panics if the expression cannot be parsed.
     parsed. It simplifies safe initialization of global variables holding
-    cannot be parsed. It simplifies safe initialization of global variables
 $
 </pre>
 
@@ -622,7 +624,7 @@ if it has already been declared, provided:
 <li>this declaration is in the same scope as the existing declaration of <code>v</code>
 (if <code>v</code> is already declared in an outer scope, the declaration will create a new variable §),</li>
 <li>the corresponding value in the initialization is assignable to <code>v</code>, and</li>
-<li>there is at least one other variable in the declaration that is being declared anew.</li>
+<li>there is at least one other variable that is created by the declaration.</li>
 </ul>
 
 <p>
@@ -866,7 +868,7 @@ var t interface{}
 t = functionOfSomeType()
 switch t := t.(type) {
 default:
-    fmt.Printf("unexpected type %T", t)       // %T prints whatever type t has
+    fmt.Printf("unexpected type %T\n", t)     // %T prints whatever type t has
 case bool:
     fmt.Printf("boolean %t\n", t)             // t has type bool
 case int:
@@ -1382,7 +1384,7 @@ limit of how much data to read.  Here is the signature of the
 <code>os</code>:
 </p>
 <pre>
-func (file *File) Read(buf []byte) (n int, err error)
+func (f *File) Read(buf []byte) (n int, err error)
 </pre>
 <p>
 The method returns the number of bytes read and an error value, if
@@ -1402,11 +1404,11 @@ the moment, the following snippet would also read the first 32 bytes of the buff
     var err error
     for i := 0; i &lt; 32; i++ {
         nbytes, e := f.Read(buf[i:i+1])  // Read one byte.
+        n += nbytes
         if nbytes == 0 || e != nil {
             err = e
             break
         }
-        n += nbytes
     }
 </pre>
 <p>
@@ -1421,7 +1423,7 @@ resulting slice is returned.  The function uses the fact that
 <code>nil</code> slice, and return 0.
 </p>
 <pre>
-func Append(slice, data[]byte) []byte {
+func Append(slice, data []byte) []byte {
     l := len(slice)
     if l + len(data) &gt; cap(slice) {  // reallocate
         // Allocate double what's needed, for future growth.
@@ -1431,9 +1433,7 @@ func Append(slice, data[]byte) []byte {
         slice = newSlice
     }
     slice = slice[0:l+len(data)]
-    for i, c := range data {
-        slice[l+i] = c
-    }
+    copy(slice[l:], data)
     return slice
 }
 </pre>
@@ -1521,7 +1521,7 @@ for i := range picture {
 <p>
 Maps are a convenient and powerful built-in data structure that associate
 values of one type (the <em>key</em>) with values of another type
-(the <em>element</em> or <em>value</em>)
+(the <em>element</em> or <em>value</em>).
 The key can be of any type for which the equality operator is defined,
 such as integers,
 floating point and complex numbers,
@@ -1580,7 +1580,7 @@ if attended[person] { // will be false if person is not in the map
 <p>
 Sometimes you need to distinguish a missing entry from
 a zero value.  Is there an entry for <code>"UTC"</code>
-or is that the empty string because it's not in the map at all?
+or is that 0 because it's not in the map at all?
 You can discriminate with a form of multiple assignment.
 </p>
 <pre>
@@ -1680,13 +1680,15 @@ maps.  Here is a print statement for the time zone map defined in the previous s
 fmt.Printf("%v\n", timeZone)  // or just fmt.Println(timeZone)
 </pre>
 <p>
-which gives output
+which gives output:
 </p>
 <pre>
-map[CST:-21600 PST:-28800 EST:-18000 UTC:0 MST:-25200]
+map[CST:-21600 EST:-18000 MST:-25200 PST:-28800 UTC:0]
 </pre>
 <p>
-For maps the keys may be output in any order, of course.
+For maps, <code>Printf</code> and friends sort the output lexicographically by key.
+</p>
+<p>
 When printing a struct, the modified format <code>%+v</code> annotates the
 fields of the structure with their names, and for any value the alternate
 format <code>%#v</code> prints the value in full Go syntax.
@@ -1710,7 +1712,7 @@ prints
 &amp;{7 -2.35 abc   def}
 &amp;{a:7 b:-2.35 c:abc     def}
 &amp;main.T{a:7, b:-2.35, c:"abc\tdef"}
-map[string] int{"CST":-21600, "PST":-28800, "EST":-18000, "UTC":0, "MST":-25200}
+map[string]int{"CST":-21600, "EST":-18000, "MST":-25200, "PST":-28800, "UTC":0}
 </pre>
 <p>
 (Note the ampersands.)
@@ -1733,7 +1735,7 @@ fmt.Printf(&quot;%T\n&quot;, timeZone)
 prints
 </p>
 <pre>
-map[string] int
+map[string]int
 </pre>
 <p>
 If you want to control the default format for a custom type, all that's required is to define
@@ -1833,7 +1835,7 @@ for a min function that chooses the least of a list of integers:
 </p>
 <pre>
 func Min(a ...int) int {
-    min := int(^uint(0) >> 1)  // largest int
+    min := int(^uint(0) &gt;&gt; 1)  // largest int
     for _, i := range a {
         if i &lt; min {
             min = i
@@ -2014,7 +2016,7 @@ then make the receiver for the method a value of that type.
 type ByteSlice []byte
 
 func (slice ByteSlice) Append(data []byte) []byte {
-    // Body exactly the same as above
+    // Body exactly the same as the Append function defined above.
 }
 </pre>
 <p>
@@ -2106,12 +2108,14 @@ In this contrived example <code>Sequence</code> satisfies both.
 
 <p>
 The <code>String</code> method of <code>Sequence</code> is recreating the
-work that <code>Sprint</code> already does for slices.  We can share the
-effort if we convert the <code>Sequence</code> to a plain
+work that <code>Sprint</code> already does for slices.
+(It also has complexity O(N²), which is poor.) We can share the
+effort (and also speed it up) if we convert the <code>Sequence</code> to a plain
 <code>[]int</code> before calling <code>Sprint</code>.
 </p>
 <pre>
 func (s Sequence) String() string {
+    s = s.Copy()
     sort.Sort(s)
     return fmt.Sprint([]int(s))
 }
@@ -2138,6 +2142,7 @@ type Sequence []int
 
 // Method for printing - sorts the elements before printing
 func (s Sequence) String() string {
+    s = s.Copy()
     sort.IntSlice(s).Sort()
     return fmt.Sprint([]int(s))
 }
@@ -2238,13 +2243,12 @@ if str, ok := value.(string); ok {
 
 <h3 id="generality">Generality</h3>
 <p>
-If a type exists only to implement an interface
-and has no exported methods beyond that interface,
-there is no need to export the type itself.
-Exporting just the interface makes it clear that
-it's the behavior that matters, not the implementation,
-and that other implementations with different properties
-can mirror the behavior of the original type.
+If a type exists only to implement an interface and will
+never have exported methods beyond that interface, there is
+no need to export the type itself.
+Exporting just the interface makes it clear the value has no
+interesting behavior beyond what is described in the
+interface.
 It also avoids the need to repeat the documentation
 on every instance of a common method.
 </p>
@@ -2278,8 +2282,8 @@ The  <code>crypto/cipher</code> interfaces look like this:
 <pre>
 type Block interface {
     BlockSize() int
-    Encrypt(src, dst []byte)
-    Decrypt(src, dst []byte)
+    Encrypt(dst, src []byte)
+    Decrypt(dst, src []byte)
 }
 
 type Stream interface {
@@ -2332,10 +2336,9 @@ of the request from the client.
 </p>
 <p>
 For brevity, let's ignore POSTs and assume HTTP requests are always
-GETs; that simplification does not affect the way the handlers are
-set up.  Here's a trivial but complete implementation of a handler to
-count the number of times the
-page is visited.
+GETs; that simplification does not affect the way the handlers are set up.
+Here's a trivial implementation of a handler to count the number of times
+the page is visited.
 </p>
 <pre>
 // Simple counter server.
@@ -2351,6 +2354,11 @@ func (ctr *Counter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 <p>
 (Keeping with our theme, note how <code>Fprintf</code> can print to an
 <code>http.ResponseWriter</code>.)
+In a real server, access to <code>ctr.n</code> would need protection from
+concurrent access.
+See the <code>sync</code> and <code>atomic</code> packages for suggestions.
+</p>
+<p>
 For reference, here's how to attach such a server to a node on the URL tree.
 </p>
 <pre>
@@ -2410,7 +2418,7 @@ The <code>http</code> package contains this code:
 // Handler object that calls f.
 type HandlerFunc func(ResponseWriter, *Request)
 
-// ServeHTTP calls f(c, req).
+// ServeHTTP calls f(w, req).
 func (f HandlerFunc) ServeHTTP(w ResponseWriter, req *Request) {
     f(w, req)
 }
@@ -2448,7 +2456,7 @@ the handler installed at that page has value <code>ArgServer</code>
 and type <code>HandlerFunc</code>.
 The HTTP server will invoke the method <code>ServeHTTP</code>
 of that type, with <code>ArgServer</code> as the receiver, which will in turn call
-<code>ArgServer</code> (via the invocation <code>f(c, req)</code>
+<code>ArgServer</code> (via the invocation <code>f(w, req)</code>
 inside <code>HandlerFunc.ServeHTTP</code>).
 The arguments will then be displayed.
 </p>
@@ -2691,8 +2699,7 @@ type ReadWriter interface {
 <p>
 This says just what it looks like: A <code>ReadWriter</code> can do
 what a <code>Reader</code> does <em>and</em> what a <code>Writer</code>
-does; it is a union of the embedded interfaces (which must be disjoint
-sets of methods).
+does; it is a union of the embedded interfaces.
 Only interfaces can be embedded within interfaces.
 </p>
 <p>
@@ -2765,7 +2772,7 @@ type Job struct {
 }
 </pre>
 <p>
-The <code>Job</code> type now has the <code>Log</code>, <code>Logf</code>
+The <code>Job</code> type now has the <code>Print</code>, <code>Printf</code>, <code>Println</code>
 and other
 methods of <code>*log.Logger</code>.  We could have given the <code>Logger</code>
 a field name, of course, but it's not necessary to do so.  And now, once
@@ -2773,7 +2780,7 @@ initialized, we can
 log to the <code>Job</code>:
 </p>
 <pre>
-job.Log("starting now...")
+job.Println("starting now...")
 </pre>
 <p>
 The <code>Logger</code> is a regular field of the <code>Job</code> struct,
@@ -2793,15 +2800,15 @@ job := &amp;Job{command, log.New(os.Stderr, "Job: ", log.Ldate)}
 <p>
 If we need to refer to an embedded field directly, the type name of the field,
 ignoring the package qualifier, serves as a field name, as it did
-in the <code>Read</code> method of our <code>ReaderWriter</code> struct.
+in the <code>Read</code> method of our <code>ReadWriter</code> struct.
 Here, if we needed to access the
 <code>*log.Logger</code> of a <code>Job</code> variable <code>job</code>,
 we would write <code>job.Logger</code>,
 which would be useful if we wanted to refine the methods of <code>Logger</code>.
 </p>
 <pre>
-func (job *Job) Logf(format string, args ...interface{}) {
-    job.Logger.Logf("%q: %s", job.Command, fmt.Sprintf(format, args...))
+func (job *Job) Printf(format string, args ...interface{}) {
+    job.Logger.Printf("%q: %s", job.Command, fmt.Sprintf(format, args...))
 }
 </pre>
 <p>
@@ -3054,7 +3061,7 @@ req := req
 </pre>
 
 <p>
-but it's a legal and idiomatic in Go to do this.
+but it's legal and idiomatic in Go to do this.
 You get a fresh version of the variable with the same name, deliberately
 shadowing the loop variable locally but unique to each goroutine.
 </p>
@@ -3172,40 +3179,44 @@ count the completion signals by draining the channel after
 launching all the goroutines.
 </p>
 <pre>
-const NCPU = 4  // number of CPU cores
+const numCPU = 4 // number of CPU cores
 
 func (v Vector) DoAll(u Vector) {
-    c := make(chan int, NCPU)  // Buffering optional but sensible.
-    for i := 0; i &lt; NCPU; i++ {
-        go v.DoSome(i*len(v)/NCPU, (i+1)*len(v)/NCPU, u, c)
+    c := make(chan int, numCPU)  // Buffering optional but sensible.
+    for i := 0; i &lt; numCPU; i++ {
+        go v.DoSome(i*len(v)/numCPU, (i+1)*len(v)/numCPU, u, c)
     }
     // Drain the channel.
-    for i := 0; i &lt; NCPU; i++ {
+    for i := 0; i &lt; numCPU; i++ {
         &lt;-c    // wait for one task to complete
     }
     // All done.
 }
-
 </pre>
-
 <p>
-The current implementation of the Go runtime
-will not parallelize this code by default.
-It dedicates only a single core to user-level processing.  An
-arbitrary number of goroutines can be blocked in system calls, but
-by default only one can be executing user-level code at any time.
-It should be smarter and one day it will be smarter, but until it
-is if you want CPU parallelism you must tell the run-time
-how many goroutines you want executing code simultaneously.  There
-are two related ways to do this.  Either run your job with environment
-variable <code>GOMAXPROCS</code> set to the number of cores to use
-or import the <code>runtime</code> package and call
-<code>runtime.GOMAXPROCS(NCPU)</code>.
-A helpful value might be <code>runtime.NumCPU()</code>, which reports the number
-of logical CPUs on the local machine.
-Again, this requirement is expected to be retired as the scheduling and run-time improve.
+Rather than create a constant value for numCPU, we can ask the runtime what
+value is appropriate.
+The function <code><a href="/pkg/runtime#NumCPU">runtime.NumCPU</a></code>
+returns the number of hardware CPU cores in the machine, so we could write
 </p>
-
+<pre>
+var numCPU = runtime.NumCPU()
+</pre>
+<p>
+There is also a function
+<code><a href="/pkg/runtime#GOMAXPROCS">runtime.GOMAXPROCS</a></code>,
+which reports (or sets)
+the user-specified number of cores that a Go program can have running
+simultaneously.
+It defaults to the value of <code>runtime.NumCPU</code> but can be
+overridden by setting the similarly named shell environment variable
+or by calling the function with a positive number.  Calling it with
+zero just queries the value.
+Therefore if we want to honor the user's resource request, we should write
+</p>
+<pre>
+var numCPU = runtime.GOMAXPROCS(0)
+</pre>
 <p>
 Be sure not to confuse the ideas of concurrency—structuring a program
 as independently executing components—and parallelism—executing
@@ -3587,8 +3598,7 @@ That's left as an exercise for the reader.
 <p>
 Let's finish with a complete Go program, a web server.
 This one is actually a kind of web re-server.
-Google provides a service at
-<a href="http://chart.apis.google.com">http://chart.apis.google.com</a>
+Google provides a service at <code>chart.apis.google.com</code>
 that does automatic formatting of data into charts and graphs.
 It's hard to use interactively, though,
 because you need to put the data into the URL as a query.
@@ -3661,4 +3671,3 @@ var _ image.Color = Black
 var _ image.Image = Black
 </pre>
 -->
-

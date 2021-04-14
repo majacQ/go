@@ -7,18 +7,24 @@
 package big
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
-	"strings"
 )
 
 // A Rat represents a quotient a/b of arbitrary precision.
 // The zero value for a Rat represents the value 0.
+//
+// Operations always take pointer arguments (*Rat) rather
+// than Rat values, and each unique Rat value requires
+// its own unique *Rat pointer. To "copy" a Rat value,
+// an existing (or newly allocated) Rat must be set to
+// a new value using the Rat.Set method; shallow copies
+// of Rats are not supported and may lead to errors.
 type Rat struct {
 	// To make zero values for Rat work w/o initialization,
-	// a zero value of b (len(b) == 0) acts like b == 1.
+	// a zero value of b (len(b) == 0) acts like b == 1. At
+	// the earliest opportunity (when an assignment to the Rat
+	// is made), such uninitialized denominators are set to 1.
 	// a.neg determines the sign of the Rat, b.neg is ignored.
 	a, b Int
 }
@@ -66,7 +72,7 @@ func (z *Rat) SetFloat64(f float64) *Rat {
 
 // quotToFloat32 returns the non-negative float32 value
 // nearest to the quotient a/b, using round-to-even in
-// halfway cases.  It does not mutate its arguments.
+// halfway cases. It does not mutate its arguments.
 // Preconditions: b is non-zero; a and b have no common factors.
 func quotToFloat32(a, b nat) (f float32, exact bool) {
 	const (
@@ -164,7 +170,7 @@ func quotToFloat32(a, b nat) (f float32, exact bool) {
 
 // quotToFloat64 returns the non-negative float64 value
 // nearest to the quotient a/b, using round-to-even in
-// halfway cases.  It does not mutate its arguments.
+// halfway cases. It does not mutate its arguments.
 // Preconditions: b is non-zero; a and b have no common factors.
 func quotToFloat64(a, b nat) (f float64, exact bool) {
 	const (
@@ -267,7 +273,7 @@ func quotToFloat64(a, b nat) (f float64, exact bool) {
 func (x *Rat) Float32() (f float32, exact bool) {
 	b := x.b.abs
 	if len(b) == 0 {
-		b = b.set(natOne) // materialize denominator
+		b = natOne
 	}
 	f, exact = quotToFloat32(x.a.abs, b)
 	if x.a.neg {
@@ -283,7 +289,7 @@ func (x *Rat) Float32() (f float32, exact bool) {
 func (x *Rat) Float64() (f float64, exact bool) {
 	b := x.b.abs
 	if len(b) == 0 {
-		b = b.set(natOne) // materialize denominator
+		b = natOne
 	}
 	f, exact = quotToFloat64(x.a.abs, b)
 	if x.a.neg {
@@ -293,6 +299,7 @@ func (x *Rat) Float64() (f float64, exact bool) {
 }
 
 // SetFrac sets z to a/b and returns z.
+// If b == 0, SetFrac panics.
 func (z *Rat) SetFrac(a, b *Int) *Rat {
 	z.a.neg = a.neg != b.neg
 	babs := b.abs
@@ -308,11 +315,12 @@ func (z *Rat) SetFrac(a, b *Int) *Rat {
 }
 
 // SetFrac64 sets z to a/b and returns z.
+// If b == 0, SetFrac64 panics.
 func (z *Rat) SetFrac64(a, b int64) *Rat {
-	z.a.SetInt64(a)
 	if b == 0 {
 		panic("division by zero")
 	}
+	z.a.SetInt64(a)
 	if b < 0 {
 		b = -b
 		z.a.neg = !z.a.neg
@@ -324,14 +332,21 @@ func (z *Rat) SetFrac64(a, b int64) *Rat {
 // SetInt sets z to x (by making a copy of x) and returns z.
 func (z *Rat) SetInt(x *Int) *Rat {
 	z.a.Set(x)
-	z.b.abs = z.b.abs.make(0)
+	z.b.abs = z.b.abs.setWord(1)
 	return z
 }
 
 // SetInt64 sets z to x and returns z.
 func (z *Rat) SetInt64(x int64) *Rat {
 	z.a.SetInt64(x)
-	z.b.abs = z.b.abs.make(0)
+	z.b.abs = z.b.abs.setWord(1)
+	return z
+}
+
+// SetUint64 sets z to x and returns z.
+func (z *Rat) SetUint64(x uint64) *Rat {
+	z.a.SetUint64(x)
+	z.b.abs = z.b.abs.setWord(1)
 	return z
 }
 
@@ -340,6 +355,9 @@ func (z *Rat) Set(x *Rat) *Rat {
 	if z != x {
 		z.a.Set(&x.a)
 		z.b.Set(&x.b)
+	}
+	if len(z.b.abs) == 0 {
+		z.b.abs = z.b.abs.setWord(1)
 	}
 	return z
 }
@@ -359,20 +377,13 @@ func (z *Rat) Neg(x *Rat) *Rat {
 }
 
 // Inv sets z to 1/x and returns z.
+// If x == 0, Inv panics.
 func (z *Rat) Inv(x *Rat) *Rat {
 	if len(x.a.abs) == 0 {
 		panic("division by zero")
 	}
 	z.Set(x)
-	a := z.b.abs
-	if len(a) == 0 {
-		a = a.set(natOne) // materialize numerator
-	}
-	b := z.a.abs
-	if b.cmp(natOne) == 0 {
-		b = b.make(0) // normalize denominator
-	}
-	z.a.abs, z.b.abs = a, b // sign doesn't change
+	z.a.abs, z.b.abs = z.b.abs, z.a.abs
 	return z
 }
 
@@ -386,7 +397,7 @@ func (x *Rat) Sign() int {
 	return x.a.Sign()
 }
 
-// IsInt returns true if the denominator of x is 1.
+// IsInt reports whether the denominator of x is 1.
 func (x *Rat) IsInt() bool {
 	return len(x.b.abs) == 0 || x.b.abs.cmp(natOne) == 0
 }
@@ -400,12 +411,19 @@ func (x *Rat) Num() *Int {
 }
 
 // Denom returns the denominator of x; it is always > 0.
-// The result is a reference to x's denominator; it
+// The result is a reference to x's denominator, unless
+// x is an uninitialized (zero value) Rat, in which case
+// the result is a new Int of value 1. (To initialize x,
+// any operation that sets x will do, including x.Set(x).)
+// If the result is a reference to x's denominator it
 // may change if a new value is assigned to x, and vice versa.
 func (x *Rat) Denom() *Int {
 	x.b.neg = false // the result is always >= 0
 	if len(x.b.abs) == 0 {
-		x.b.abs = x.b.abs.set(natOne) // materialize denominator
+		// Note: If this proves problematic, we could
+		//       panic instead and require the Rat to
+		//       be explicitly initialized.
+		return &Int{abs: nat{1}}
 	}
 	return &x.b
 }
@@ -413,25 +431,20 @@ func (x *Rat) Denom() *Int {
 func (z *Rat) norm() *Rat {
 	switch {
 	case len(z.a.abs) == 0:
-		// z == 0 - normalize sign and denominator
+		// z == 0; normalize sign and denominator
 		z.a.neg = false
-		z.b.abs = z.b.abs.make(0)
+		fallthrough
 	case len(z.b.abs) == 0:
-		// z is normalized int - nothing to do
-	case z.b.abs.cmp(natOne) == 0:
-		// z is int - normalize denominator
-		z.b.abs = z.b.abs.make(0)
+		// z is integer; normalize denominator
+		z.b.abs = z.b.abs.setWord(1)
 	default:
+		// z is fraction; normalize numerator and denominator
 		neg := z.a.neg
 		z.a.neg = false
 		z.b.neg = false
-		if f := NewInt(0).binaryGCD(&z.a, &z.b); f.Cmp(intOne) != 0 {
+		if f := NewInt(0).lehmerGCD(nil, nil, &z.a, &z.b); f.Cmp(intOne) != 0 {
 			z.a.abs, _ = z.a.abs.div(nil, z.a.abs, f.abs)
 			z.b.abs, _ = z.b.abs.div(nil, z.b.abs, f.abs)
-			if z.b.abs.cmp(natOne) == 0 {
-				// z is int - normalize denominator
-				z.b.abs = z.b.abs.make(0)
-			}
 		}
 		z.a.neg = neg
 	}
@@ -443,6 +456,8 @@ func (z *Rat) norm() *Rat {
 // returns z.
 func mulDenom(z, x, y nat) nat {
 	switch {
+	case len(x) == 0 && len(y) == 0:
+		return z.setWord(1)
 	case len(x) == 0:
 		return z.set(y)
 	case len(y) == 0:
@@ -451,16 +466,15 @@ func mulDenom(z, x, y nat) nat {
 	return z.mul(x, y)
 }
 
-// scaleDenom computes x*f.
-// If f == 0 (zero value of denominator), the result is (a copy of) x.
-func scaleDenom(x *Int, f nat) *Int {
-	var z Int
+// scaleDenom sets z to the product x*f.
+// If f == 0 (zero value of denominator), z is set to (a copy of) x.
+func (z *Int) scaleDenom(x *Int, f nat) {
 	if len(f) == 0 {
-		return z.Set(x)
+		z.Set(x)
+		return
 	}
 	z.abs = z.abs.mul(x.abs, f)
 	z.neg = x.neg
-	return &z
 }
 
 // Cmp compares x and y and returns:
@@ -470,247 +484,61 @@ func scaleDenom(x *Int, f nat) *Int {
 //   +1 if x >  y
 //
 func (x *Rat) Cmp(y *Rat) int {
-	return scaleDenom(&x.a, y.b.abs).Cmp(scaleDenom(&y.a, x.b.abs))
+	var a, b Int
+	a.scaleDenom(&x.a, y.b.abs)
+	b.scaleDenom(&y.a, x.b.abs)
+	return a.Cmp(&b)
 }
 
 // Add sets z to the sum x+y and returns z.
 func (z *Rat) Add(x, y *Rat) *Rat {
-	a1 := scaleDenom(&x.a, y.b.abs)
-	a2 := scaleDenom(&y.a, x.b.abs)
-	z.a.Add(a1, a2)
+	var a1, a2 Int
+	a1.scaleDenom(&x.a, y.b.abs)
+	a2.scaleDenom(&y.a, x.b.abs)
+	z.a.Add(&a1, &a2)
 	z.b.abs = mulDenom(z.b.abs, x.b.abs, y.b.abs)
 	return z.norm()
 }
 
 // Sub sets z to the difference x-y and returns z.
 func (z *Rat) Sub(x, y *Rat) *Rat {
-	a1 := scaleDenom(&x.a, y.b.abs)
-	a2 := scaleDenom(&y.a, x.b.abs)
-	z.a.Sub(a1, a2)
+	var a1, a2 Int
+	a1.scaleDenom(&x.a, y.b.abs)
+	a2.scaleDenom(&y.a, x.b.abs)
+	z.a.Sub(&a1, &a2)
 	z.b.abs = mulDenom(z.b.abs, x.b.abs, y.b.abs)
 	return z.norm()
 }
 
 // Mul sets z to the product x*y and returns z.
 func (z *Rat) Mul(x, y *Rat) *Rat {
+	if x == y {
+		// a squared Rat is positive and can't be reduced (no need to call norm())
+		z.a.neg = false
+		z.a.abs = z.a.abs.sqr(x.a.abs)
+		if len(x.b.abs) == 0 {
+			z.b.abs = z.b.abs.setWord(1)
+		} else {
+			z.b.abs = z.b.abs.sqr(x.b.abs)
+		}
+		return z
+	}
 	z.a.Mul(&x.a, &y.a)
 	z.b.abs = mulDenom(z.b.abs, x.b.abs, y.b.abs)
 	return z.norm()
 }
 
 // Quo sets z to the quotient x/y and returns z.
-// If y == 0, a division-by-zero run-time panic occurs.
+// If y == 0, Quo panics.
 func (z *Rat) Quo(x, y *Rat) *Rat {
 	if len(y.a.abs) == 0 {
 		panic("division by zero")
 	}
-	a := scaleDenom(&x.a, y.b.abs)
-	b := scaleDenom(&y.a, x.b.abs)
+	var a, b Int
+	a.scaleDenom(&x.a, y.b.abs)
+	b.scaleDenom(&y.a, x.b.abs)
 	z.a.abs = a.abs
 	z.b.abs = b.abs
 	z.a.neg = a.neg != b.neg
 	return z.norm()
-}
-
-func ratTok(ch rune) bool {
-	return strings.IndexRune("+-/0123456789.eE", ch) >= 0
-}
-
-// Scan is a support routine for fmt.Scanner. It accepts the formats
-// 'e', 'E', 'f', 'F', 'g', 'G', and 'v'. All formats are equivalent.
-func (z *Rat) Scan(s fmt.ScanState, ch rune) error {
-	tok, err := s.Token(true, ratTok)
-	if err != nil {
-		return err
-	}
-	if strings.IndexRune("efgEFGv", ch) < 0 {
-		return errors.New("Rat.Scan: invalid verb")
-	}
-	if _, ok := z.SetString(string(tok)); !ok {
-		return errors.New("Rat.Scan: invalid syntax")
-	}
-	return nil
-}
-
-// SetString sets z to the value of s and returns z and a boolean indicating
-// success. s can be given as a fraction "a/b" or as a floating-point number
-// optionally followed by an exponent. If the operation failed, the value of
-// z is undefined but the returned value is nil.
-func (z *Rat) SetString(s string) (*Rat, bool) {
-	if len(s) == 0 {
-		return nil, false
-	}
-
-	// check for a quotient
-	sep := strings.Index(s, "/")
-	if sep >= 0 {
-		if _, ok := z.a.SetString(s[0:sep], 10); !ok {
-			return nil, false
-		}
-		s = s[sep+1:]
-		var err error
-		if z.b.abs, _, err = z.b.abs.scan(strings.NewReader(s), 10); err != nil {
-			return nil, false
-		}
-		if len(z.b.abs) == 0 {
-			return nil, false
-		}
-		return z.norm(), true
-	}
-
-	// check for a decimal point
-	sep = strings.Index(s, ".")
-	// check for an exponent
-	e := strings.IndexAny(s, "eE")
-	var exp Int
-	if e >= 0 {
-		if e < sep {
-			// The E must come after the decimal point.
-			return nil, false
-		}
-		if _, ok := exp.SetString(s[e+1:], 10); !ok {
-			return nil, false
-		}
-		s = s[0:e]
-	}
-	if sep >= 0 {
-		s = s[0:sep] + s[sep+1:]
-		exp.Sub(&exp, NewInt(int64(len(s)-sep)))
-	}
-
-	if _, ok := z.a.SetString(s, 10); !ok {
-		return nil, false
-	}
-	powTen := nat(nil).expNN(natTen, exp.abs, nil)
-	if exp.neg {
-		z.b.abs = powTen
-		z.norm()
-	} else {
-		z.a.abs = z.a.abs.mul(z.a.abs, powTen)
-		z.b.abs = z.b.abs.make(0)
-	}
-
-	return z, true
-}
-
-// String returns a string representation of x in the form "a/b" (even if b == 1).
-func (x *Rat) String() string {
-	s := "/1"
-	if len(x.b.abs) != 0 {
-		s = "/" + x.b.abs.decimalString()
-	}
-	return x.a.String() + s
-}
-
-// RatString returns a string representation of x in the form "a/b" if b != 1,
-// and in the form "a" if b == 1.
-func (x *Rat) RatString() string {
-	if x.IsInt() {
-		return x.a.String()
-	}
-	return x.String()
-}
-
-// FloatString returns a string representation of x in decimal form with prec
-// digits of precision after the decimal point and the last digit rounded.
-func (x *Rat) FloatString(prec int) string {
-	if x.IsInt() {
-		s := x.a.String()
-		if prec > 0 {
-			s += "." + strings.Repeat("0", prec)
-		}
-		return s
-	}
-	// x.b.abs != 0
-
-	q, r := nat(nil).div(nat(nil), x.a.abs, x.b.abs)
-
-	p := natOne
-	if prec > 0 {
-		p = nat(nil).expNN(natTen, nat(nil).setUint64(uint64(prec)), nil)
-	}
-
-	r = r.mul(r, p)
-	r, r2 := r.div(nat(nil), r, x.b.abs)
-
-	// see if we need to round up
-	r2 = r2.add(r2, r2)
-	if x.b.abs.cmp(r2) <= 0 {
-		r = r.add(r, natOne)
-		if r.cmp(p) >= 0 {
-			q = nat(nil).add(q, natOne)
-			r = nat(nil).sub(r, p)
-		}
-	}
-
-	s := q.decimalString()
-	if x.a.neg {
-		s = "-" + s
-	}
-
-	if prec > 0 {
-		rs := r.decimalString()
-		leadingZeros := prec - len(rs)
-		s += "." + strings.Repeat("0", leadingZeros) + rs
-	}
-
-	return s
-}
-
-// Gob codec version. Permits backward-compatible changes to the encoding.
-const ratGobVersion byte = 1
-
-// GobEncode implements the gob.GobEncoder interface.
-func (x *Rat) GobEncode() ([]byte, error) {
-	if x == nil {
-		return nil, nil
-	}
-	buf := make([]byte, 1+4+(len(x.a.abs)+len(x.b.abs))*_S) // extra bytes for version and sign bit (1), and numerator length (4)
-	i := x.b.abs.bytes(buf)
-	j := x.a.abs.bytes(buf[0:i])
-	n := i - j
-	if int(uint32(n)) != n {
-		// this should never happen
-		return nil, errors.New("Rat.GobEncode: numerator too large")
-	}
-	binary.BigEndian.PutUint32(buf[j-4:j], uint32(n))
-	j -= 1 + 4
-	b := ratGobVersion << 1 // make space for sign bit
-	if x.a.neg {
-		b |= 1
-	}
-	buf[j] = b
-	return buf[j:], nil
-}
-
-// GobDecode implements the gob.GobDecoder interface.
-func (z *Rat) GobDecode(buf []byte) error {
-	if len(buf) == 0 {
-		// Other side sent a nil or default value.
-		*z = Rat{}
-		return nil
-	}
-	b := buf[0]
-	if b>>1 != ratGobVersion {
-		return errors.New(fmt.Sprintf("Rat.GobDecode: encoding version %d not supported", b>>1))
-	}
-	const j = 1 + 4
-	i := j + binary.BigEndian.Uint32(buf[j-4:j])
-	z.a.neg = b&1 != 0
-	z.a.abs = z.a.abs.setBytes(buf[j:i])
-	z.b.abs = z.b.abs.setBytes(buf[i:])
-	return nil
-}
-
-// MarshalText implements the encoding.TextMarshaler interface.
-func (r *Rat) MarshalText() (text []byte, err error) {
-	return []byte(r.RatString()), nil
-}
-
-// UnmarshalText implements the encoding.TextUnmarshaler interface.
-func (r *Rat) UnmarshalText(text []byte) error {
-	if _, ok := r.SetString(string(text)); !ok {
-		return fmt.Errorf("math/big: cannot unmarshal %q into a *big.Rat", text)
-	}
-	return nil
 }

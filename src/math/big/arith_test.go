@@ -5,51 +5,14 @@
 package big
 
 import (
+	"fmt"
+	"internal/testenv"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
-type funWW func(x, y, c Word) (z1, z0 Word)
-type argWW struct {
-	x, y, c, z1, z0 Word
-}
-
-var sumWW = []argWW{
-	{0, 0, 0, 0, 0},
-	{0, 1, 0, 0, 1},
-	{0, 0, 1, 0, 1},
-	{0, 1, 1, 0, 2},
-	{12345, 67890, 0, 0, 80235},
-	{12345, 67890, 1, 0, 80236},
-	{_M, 1, 0, 1, 0},
-	{_M, 0, 1, 1, 0},
-	{_M, 1, 1, 1, 1},
-	{_M, _M, 0, 1, _M - 1},
-	{_M, _M, 1, 1, _M},
-}
-
-func testFunWW(t *testing.T, msg string, f funWW, a argWW) {
-	z1, z0 := f(a.x, a.y, a.c)
-	if z1 != a.z1 || z0 != a.z0 {
-		t.Errorf("%s%+v\n\tgot z1:z0 = %#x:%#x; want %#x:%#x", msg, a, z1, z0, a.z1, a.z0)
-	}
-}
-
-func TestFunWW(t *testing.T) {
-	for _, a := range sumWW {
-		arg := a
-		testFunWW(t, "addWW_g", addWW_g, arg)
-
-		arg = argWW{a.y, a.x, a.c, a.z1, a.z0}
-		testFunWW(t, "addWW_g symmetric", addWW_g, arg)
-
-		arg = argWW{a.z0, a.x, a.c, a.z1, a.y}
-		testFunWW(t, "subWW_g", subWW_g, arg)
-
-		arg = argWW{a.z0, a.y, a.c, a.z1, a.x}
-		testFunWW(t, "subWW_g symmetric", subWW_g, arg)
-	}
-}
+var isRaceBuilder = strings.HasSuffix(testenv.Builder(), "-race")
 
 type funVV func(z, x, y []Word) (c Word)
 type argVV struct {
@@ -118,27 +81,41 @@ func rndV(n int) []Word {
 	return v
 }
 
-func benchmarkFunVV(b *testing.B, f funVV, n int) {
-	x := rndV(n)
-	y := rndV(n)
-	z := make([]Word, n)
-	b.SetBytes(int64(n * _W))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		f(z, x, y)
+var benchSizes = []int{1, 2, 3, 4, 5, 1e1, 1e2, 1e3, 1e4, 1e5}
+
+func BenchmarkAddVV(b *testing.B) {
+	for _, n := range benchSizes {
+		if isRaceBuilder && n > 1e3 {
+			continue
+		}
+		x := rndV(n)
+		y := rndV(n)
+		z := make([]Word, n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.SetBytes(int64(n * _W))
+			for i := 0; i < b.N; i++ {
+				addVV(z, x, y)
+			}
+		})
 	}
 }
 
-func BenchmarkAddVV_1(b *testing.B)   { benchmarkFunVV(b, addVV, 1) }
-func BenchmarkAddVV_2(b *testing.B)   { benchmarkFunVV(b, addVV, 2) }
-func BenchmarkAddVV_3(b *testing.B)   { benchmarkFunVV(b, addVV, 3) }
-func BenchmarkAddVV_4(b *testing.B)   { benchmarkFunVV(b, addVV, 4) }
-func BenchmarkAddVV_5(b *testing.B)   { benchmarkFunVV(b, addVV, 5) }
-func BenchmarkAddVV_1e1(b *testing.B) { benchmarkFunVV(b, addVV, 1e1) }
-func BenchmarkAddVV_1e2(b *testing.B) { benchmarkFunVV(b, addVV, 1e2) }
-func BenchmarkAddVV_1e3(b *testing.B) { benchmarkFunVV(b, addVV, 1e3) }
-func BenchmarkAddVV_1e4(b *testing.B) { benchmarkFunVV(b, addVV, 1e4) }
-func BenchmarkAddVV_1e5(b *testing.B) { benchmarkFunVV(b, addVV, 1e5) }
+func BenchmarkSubVV(b *testing.B) {
+	for _, n := range benchSizes {
+		if isRaceBuilder && n > 1e3 {
+			continue
+		}
+		x := rndV(n)
+		y := rndV(n)
+		z := make([]Word, n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.SetBytes(int64(n * _W))
+			for i := 0; i < b.N; i++ {
+				subVV(z, x, y)
+			}
+		})
+	}
+}
 
 type funVW func(z, x []Word, y Word) (c Word)
 type argVW struct {
@@ -155,21 +132,7 @@ var sumVW = []argVW{
 	{nat{1}, nat{1}, 0, 0},
 	{nat{0}, nat{_M}, 1, 1},
 	{nat{0, 0, 0, 0}, nat{_M, _M, _M, _M}, 1, 1},
-}
-
-var prodVW = []argVW{
-	{},
-	{nat{0}, nat{0}, 0, 0},
-	{nat{0}, nat{_M}, 0, 0},
-	{nat{0}, nat{0}, _M, 0},
-	{nat{1}, nat{1}, 1, 0},
-	{nat{22793}, nat{991}, 23, 0},
-	{nat{0, 0, 0, 22793}, nat{0, 0, 0, 991}, 23, 0},
-	{nat{0, 0, 0, 0}, nat{7893475, 7395495, 798547395, 68943}, 0, 0},
-	{nat{0, 0, 0, 0}, nat{0, 0, 0, 0}, 894375984, 0},
-	{nat{_M << 1 & _M}, nat{_M}, 1 << 1, _M >> (_W - 1)},
-	{nat{_M << 7 & _M}, nat{_M}, 1 << 7, _M >> (_W - 7)},
-	{nat{_M << 7 & _M, _M, _M, _M}, nat{_M, _M, _M, _M}, 1 << 7, _M >> (_W - 7)},
+	{nat{585}, nat{314}, 271, 0},
 }
 
 var lshVW = []argVW{
@@ -250,27 +213,108 @@ func TestFunVW(t *testing.T) {
 	}
 }
 
-func benchmarkFunVW(b *testing.B, f funVW, n int) {
-	x := rndV(n)
-	y := rndW()
-	z := make([]Word, n)
-	b.SetBytes(int64(n * _W))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		f(z, x, y)
+type argVU struct {
+	d  []Word // d is a Word slice, the input parameters x and z come from this array.
+	l  uint   // l is the length of the input parameters x and z.
+	xp uint   // xp is the starting position of the input parameter x, x := d[xp:xp+l].
+	zp uint   // zp is the starting position of the input parameter z, z := d[zp:zp+l].
+	s  uint   // s is the shift number.
+	r  []Word // r is the expected output result z.
+	c  Word   // c is the expected return value.
+	m  string // message.
+}
+
+var argshlVU = []argVU{
+	// test cases for shlVU
+	{[]Word{1, _M, _M, _M, _M, _M, 3 << (_W - 2), 0}, 7, 0, 0, 1, []Word{2, _M - 1, _M, _M, _M, _M, 1<<(_W-1) + 1}, 1, "complete overlap of shlVU"},
+	{[]Word{1, _M, _M, _M, _M, _M, 3 << (_W - 2), 0, 0, 0, 0}, 7, 0, 3, 1, []Word{2, _M - 1, _M, _M, _M, _M, 1<<(_W-1) + 1}, 1, "partial overlap by half of shlVU"},
+	{[]Word{1, _M, _M, _M, _M, _M, 3 << (_W - 2), 0, 0, 0, 0, 0, 0, 0}, 7, 0, 6, 1, []Word{2, _M - 1, _M, _M, _M, _M, 1<<(_W-1) + 1}, 1, "partial overlap by 1 Word of shlVU"},
+	{[]Word{1, _M, _M, _M, _M, _M, 3 << (_W - 2), 0, 0, 0, 0, 0, 0, 0, 0}, 7, 0, 7, 1, []Word{2, _M - 1, _M, _M, _M, _M, 1<<(_W-1) + 1}, 1, "no overlap of shlVU"},
+}
+
+var argshrVU = []argVU{
+	// test cases for shrVU
+	{[]Word{0, 3, _M, _M, _M, _M, _M, 1 << (_W - 1)}, 7, 1, 1, 1, []Word{1<<(_W-1) + 1, _M, _M, _M, _M, _M >> 1, 1 << (_W - 2)}, 1 << (_W - 1), "complete overlap of shrVU"},
+	{[]Word{0, 0, 0, 0, 3, _M, _M, _M, _M, _M, 1 << (_W - 1)}, 7, 4, 1, 1, []Word{1<<(_W-1) + 1, _M, _M, _M, _M, _M >> 1, 1 << (_W - 2)}, 1 << (_W - 1), "partial overlap by half of shrVU"},
+	{[]Word{0, 0, 0, 0, 0, 0, 0, 3, _M, _M, _M, _M, _M, 1 << (_W - 1)}, 7, 7, 1, 1, []Word{1<<(_W-1) + 1, _M, _M, _M, _M, _M >> 1, 1 << (_W - 2)}, 1 << (_W - 1), "partial overlap by 1 Word of shrVU"},
+	{[]Word{0, 0, 0, 0, 0, 0, 0, 0, 3, _M, _M, _M, _M, _M, 1 << (_W - 1)}, 7, 8, 1, 1, []Word{1<<(_W-1) + 1, _M, _M, _M, _M, _M >> 1, 1 << (_W - 2)}, 1 << (_W - 1), "no overlap of shrVU"},
+}
+
+func testShiftFunc(t *testing.T, f func(z, x []Word, s uint) Word, a argVU) {
+	// save a.d for error message, or it will be overwritten.
+	b := make([]Word, len(a.d))
+	copy(b, a.d)
+	z := a.d[a.zp : a.zp+a.l]
+	x := a.d[a.xp : a.xp+a.l]
+	c := f(z, x, a.s)
+	for i, zi := range z {
+		if zi != a.r[i] {
+			t.Errorf("d := %v, %s(d[%d:%d], d[%d:%d], %d)\n\tgot z[%d] = %#x; want %#x", b, a.m, a.zp, a.zp+a.l, a.xp, a.xp+a.l, a.s, i, zi, a.r[i])
+			break
+		}
+	}
+	if c != a.c {
+		t.Errorf("d := %v, %s(d[%d:%d], d[%d:%d], %d)\n\tgot c = %#x; want %#x", b, a.m, a.zp, a.zp+a.l, a.xp, a.xp+a.l, a.s, c, a.c)
 	}
 }
 
-func BenchmarkAddVW_1(b *testing.B)   { benchmarkFunVW(b, addVW, 1) }
-func BenchmarkAddVW_2(b *testing.B)   { benchmarkFunVW(b, addVW, 2) }
-func BenchmarkAddVW_3(b *testing.B)   { benchmarkFunVW(b, addVW, 3) }
-func BenchmarkAddVW_4(b *testing.B)   { benchmarkFunVW(b, addVW, 4) }
-func BenchmarkAddVW_5(b *testing.B)   { benchmarkFunVW(b, addVW, 5) }
-func BenchmarkAddVW_1e1(b *testing.B) { benchmarkFunVW(b, addVW, 1e1) }
-func BenchmarkAddVW_1e2(b *testing.B) { benchmarkFunVW(b, addVW, 1e2) }
-func BenchmarkAddVW_1e3(b *testing.B) { benchmarkFunVW(b, addVW, 1e3) }
-func BenchmarkAddVW_1e4(b *testing.B) { benchmarkFunVW(b, addVW, 1e4) }
-func BenchmarkAddVW_1e5(b *testing.B) { benchmarkFunVW(b, addVW, 1e5) }
+func TestShiftOverlap(t *testing.T) {
+	for _, a := range argshlVU {
+		arg := a
+		testShiftFunc(t, shlVU, arg)
+	}
+
+	for _, a := range argshrVU {
+		arg := a
+		testShiftFunc(t, shrVU, arg)
+	}
+}
+
+func TestIssue31084(t *testing.T) {
+	// compute 10^n via 5^n << n.
+	const n = 165
+	p := nat(nil).expNN(nat{5}, nat{n}, nil)
+	p = p.shl(p, uint(n))
+	got := string(p.utoa(10))
+	want := "1" + strings.Repeat("0", n)
+	if got != want {
+		t.Errorf("shl(%v, %v)\n\tgot %s; want %s\n", p, uint(n), got, want)
+	}
+}
+
+func BenchmarkAddVW(b *testing.B) {
+	for _, n := range benchSizes {
+		if isRaceBuilder && n > 1e3 {
+			continue
+		}
+		x := rndV(n)
+		y := rndW()
+		z := make([]Word, n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.SetBytes(int64(n * _S))
+			for i := 0; i < b.N; i++ {
+				addVW(z, x, y)
+			}
+		})
+	}
+}
+
+func BenchmarkSubVW(b *testing.B) {
+	for _, n := range benchSizes {
+		if isRaceBuilder && n > 1e3 {
+			continue
+		}
+		x := rndV(n)
+		y := rndW()
+		z := make([]Word, n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.SetBytes(int64(n * _S))
+			for i := 0; i < b.N; i++ {
+				subVW(z, x, y)
+			}
+		})
+	}
+}
 
 type funVWW func(z, x []Word, y, r Word) (c Word)
 type argVWW struct {
@@ -396,61 +440,37 @@ func TestMulAddWWW(t *testing.T) {
 	}
 }
 
-func benchmarkAddMulVVW(b *testing.B, n int) {
-	x := rndV(n)
-	y := rndW()
-	z := make([]Word, n)
-	b.SetBytes(int64(n * _W))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		addMulVVW(z, x, y)
-	}
-}
-
-func BenchmarkAddMulVVW_1(b *testing.B)   { benchmarkAddMulVVW(b, 1) }
-func BenchmarkAddMulVVW_2(b *testing.B)   { benchmarkAddMulVVW(b, 2) }
-func BenchmarkAddMulVVW_3(b *testing.B)   { benchmarkAddMulVVW(b, 3) }
-func BenchmarkAddMulVVW_4(b *testing.B)   { benchmarkAddMulVVW(b, 4) }
-func BenchmarkAddMulVVW_5(b *testing.B)   { benchmarkAddMulVVW(b, 5) }
-func BenchmarkAddMulVVW_1e1(b *testing.B) { benchmarkAddMulVVW(b, 1e1) }
-func BenchmarkAddMulVVW_1e2(b *testing.B) { benchmarkAddMulVVW(b, 1e2) }
-func BenchmarkAddMulVVW_1e3(b *testing.B) { benchmarkAddMulVVW(b, 1e3) }
-func BenchmarkAddMulVVW_1e4(b *testing.B) { benchmarkAddMulVVW(b, 1e4) }
-func BenchmarkAddMulVVW_1e5(b *testing.B) { benchmarkAddMulVVW(b, 1e5) }
-
-func testWordBitLen(t *testing.T, fname string, f func(Word) int) {
-	for i := 0; i <= _W; i++ {
-		x := Word(1) << uint(i-1) // i == 0 => x == 0
-		n := f(x)
-		if n != i {
-			t.Errorf("got %d; want %d for %s(%#x)", n, i, fname, x)
+func BenchmarkMulAddVWW(b *testing.B) {
+	for _, n := range benchSizes {
+		if isRaceBuilder && n > 1e3 {
+			continue
 		}
+		z := make([]Word, n+1)
+		x := rndV(n)
+		y := rndW()
+		r := rndW()
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.SetBytes(int64(n * _W))
+			for i := 0; i < b.N; i++ {
+				mulAddVWW(z, x, y, r)
+			}
+		})
 	}
 }
 
-func TestWordBitLen(t *testing.T) {
-	testWordBitLen(t, "bitLen", bitLen)
-	testWordBitLen(t, "bitLen_g", bitLen_g)
-}
-
-// runs b.N iterations of bitLen called on a Word containing (1 << nbits)-1.
-func benchmarkBitLenN(b *testing.B, nbits uint) {
-	testword := Word((uint64(1) << nbits) - 1)
-	for i := 0; i < b.N; i++ {
-		bitLen(testword)
+func BenchmarkAddMulVVW(b *testing.B) {
+	for _, n := range benchSizes {
+		if isRaceBuilder && n > 1e3 {
+			continue
+		}
+		x := rndV(n)
+		y := rndW()
+		z := make([]Word, n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.SetBytes(int64(n * _W))
+			for i := 0; i < b.N; i++ {
+				addMulVVW(z, x, y)
+			}
+		})
 	}
 }
-
-// Individual bitLen tests.  Numbers chosen to examine both sides
-// of powers-of-two boundaries.
-func BenchmarkBitLen0(b *testing.B)  { benchmarkBitLenN(b, 0) }
-func BenchmarkBitLen1(b *testing.B)  { benchmarkBitLenN(b, 1) }
-func BenchmarkBitLen2(b *testing.B)  { benchmarkBitLenN(b, 2) }
-func BenchmarkBitLen3(b *testing.B)  { benchmarkBitLenN(b, 3) }
-func BenchmarkBitLen4(b *testing.B)  { benchmarkBitLenN(b, 4) }
-func BenchmarkBitLen5(b *testing.B)  { benchmarkBitLenN(b, 5) }
-func BenchmarkBitLen8(b *testing.B)  { benchmarkBitLenN(b, 8) }
-func BenchmarkBitLen9(b *testing.B)  { benchmarkBitLenN(b, 9) }
-func BenchmarkBitLen16(b *testing.B) { benchmarkBitLenN(b, 16) }
-func BenchmarkBitLen17(b *testing.B) { benchmarkBitLenN(b, 17) }
-func BenchmarkBitLen31(b *testing.B) { benchmarkBitLenN(b, 31) }

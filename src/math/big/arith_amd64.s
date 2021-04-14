@@ -2,20 +2,12 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// +build !math_big_pure_go
+
 #include "textflag.h"
 
 // This file provides fast assembly versions for the elementary
 // arithmetic operations on vectors implemented in arith.go.
-
-// Literal instruction for MOVQ $0, CX.
-// (MOVQ $0, reg is translated to XORQ reg, reg and clears CF.)
-#define ZERO_CX BYTE $0x48; \
-		BYTE $0xc7; \
-		BYTE $0xc1; \
-		BYTE $0x00; \
-		BYTE $0x00; \
-		BYTE $0x00; \
-		BYTE $0x00
 
 // func mulWW(x, y Word) (z1, z0 Word)
 TEXT ·mulWW(SB),NOSPLIT,$0
@@ -35,6 +27,9 @@ TEXT ·divWW(SB),NOSPLIT,$0
 	MOVQ DX, r+32(FP)
 	RET
 
+// The carry bit is saved with SBBQ Rx, Rx: if the carry was set, Rx is -1, otherwise it is 0.
+// It is restored with ADDQ Rx, Rx: if Rx was -1 the carry is set, otherwise it is cleared.
+// This is faster than using rotate instructions.
 
 // func addVV(z, x, y []Word) (c Word)
 TEXT ·addVV(SB),NOSPLIT,$0
@@ -52,7 +47,7 @@ TEXT ·addVV(SB),NOSPLIT,$0
 
 U1:	// n >= 0
 	// regular loop body unrolled 4x
-	RCRQ $1, CX		// CF = c
+	ADDQ CX, CX		// restore CF
 	MOVQ 0(R8)(SI*8), R11
 	MOVQ 8(R8)(SI*8), R12
 	MOVQ 16(R8)(SI*8), R13
@@ -65,7 +60,7 @@ U1:	// n >= 0
 	MOVQ R12, 8(R10)(SI*8)
 	MOVQ R13, 16(R10)(SI*8)
 	MOVQ R14, 24(R10)(SI*8)
-	RCLQ $1, CX		// c = CF
+	SBBQ CX, CX		// save CF
 
 	ADDQ $4, SI		// i += 4
 	SUBQ $4, DI		// n -= 4
@@ -75,17 +70,18 @@ V1:	ADDQ $4, DI		// n += 4
 	JLE E1			// if n <= 0 goto E1
 
 L1:	// n > 0
-	RCRQ $1, CX		// CF = c
+	ADDQ CX, CX		// restore CF
 	MOVQ 0(R8)(SI*8), R11
 	ADCQ 0(R9)(SI*8), R11
 	MOVQ R11, 0(R10)(SI*8)
-	RCLQ $1, CX		// c = CF
+	SBBQ CX, CX		// save CF
 
 	ADDQ $1, SI		// i++
 	SUBQ $1, DI		// n--
 	JG L1			// if n > 0 goto L1
 
-E1:	MOVQ CX, c+72(FP)	// return c
+E1:	NEGQ CX
+	MOVQ CX, c+72(FP)	// return c
 	RET
 
 
@@ -106,7 +102,7 @@ TEXT ·subVV(SB),NOSPLIT,$0
 
 U2:	// n >= 0
 	// regular loop body unrolled 4x
-	RCRQ $1, CX		// CF = c
+	ADDQ CX, CX		// restore CF
 	MOVQ 0(R8)(SI*8), R11
 	MOVQ 8(R8)(SI*8), R12
 	MOVQ 16(R8)(SI*8), R13
@@ -119,7 +115,7 @@ U2:	// n >= 0
 	MOVQ R12, 8(R10)(SI*8)
 	MOVQ R13, 16(R10)(SI*8)
 	MOVQ R14, 24(R10)(SI*8)
-	RCLQ $1, CX		// c = CF
+	SBBQ CX, CX		// save CF
 
 	ADDQ $4, SI		// i += 4
 	SUBQ $4, DI		// n -= 4
@@ -129,23 +125,26 @@ V2:	ADDQ $4, DI		// n += 4
 	JLE E2			// if n <= 0 goto E2
 
 L2:	// n > 0
-	RCRQ $1, CX		// CF = c
+	ADDQ CX, CX		// restore CF
 	MOVQ 0(R8)(SI*8), R11
 	SBBQ 0(R9)(SI*8), R11
 	MOVQ R11, 0(R10)(SI*8)
-	RCLQ $1, CX		// c = CF
+	SBBQ CX, CX		// save CF
 
 	ADDQ $1, SI		// i++
 	SUBQ $1, DI		// n--
 	JG L2			// if n > 0 goto L2
 
-E2:	MOVQ CX, c+72(FP)	// return c
+E2:	NEGQ CX
+	MOVQ CX, c+72(FP)	// return c
 	RET
 
 
 // func addVW(z, x []Word, y Word) (c Word)
 TEXT ·addVW(SB),NOSPLIT,$0
 	MOVQ z_len+8(FP), DI
+	CMPQ DI, $32
+	JG large
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), CX	// c = y
 	MOVQ z+0(FP), R10
@@ -163,11 +162,11 @@ U3:	// n >= 0
 	MOVQ 16(R8)(SI*8), R13
 	MOVQ 24(R8)(SI*8), R14
 	ADDQ CX, R11
-	ZERO_CX
 	ADCQ $0, R12
 	ADCQ $0, R13
 	ADCQ $0, R14
-	SETCS CX		// c = CF
+	SBBQ CX, CX		// save CF
+	NEGQ CX
 	MOVQ R11, 0(R10)(SI*8)
 	MOVQ R12, 8(R10)(SI*8)
 	MOVQ R13, 16(R10)(SI*8)
@@ -183,8 +182,8 @@ V3:	ADDQ $4, DI		// n += 4
 L3:	// n > 0
 	ADDQ 0(R8)(SI*8), CX
 	MOVQ CX, 0(R10)(SI*8)
-	ZERO_CX
-	RCLQ $1, CX		// c = CF
+	SBBQ CX, CX		// save CF
+	NEGQ CX
 
 	ADDQ $1, SI		// i++
 	SUBQ $1, DI		// n--
@@ -192,16 +191,20 @@ L3:	// n > 0
 
 E3:	MOVQ CX, c+56(FP)	// return c
 	RET
+large:
+	JMP ·addVWlarge(SB)
 
 
 // func subVW(z, x []Word, y Word) (c Word)
 // (same as addVW except for SUBQ/SBBQ instead of ADDQ/ADCQ and label names)
 TEXT ·subVW(SB),NOSPLIT,$0
 	MOVQ z_len+8(FP), DI
+	CMPQ DI, $32
+	JG large
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), CX	// c = y
 	MOVQ z+0(FP), R10
-	
+
 	MOVQ $0, SI		// i = 0
 
 	// s/JL/JMP/ below to disable the unrolled loop
@@ -215,11 +218,11 @@ U4:	// n >= 0
 	MOVQ 16(R8)(SI*8), R13
 	MOVQ 24(R8)(SI*8), R14
 	SUBQ CX, R11
-	ZERO_CX
 	SBBQ $0, R12
 	SBBQ $0, R13
 	SBBQ $0, R14
-	SETCS CX		// c = CF
+	SBBQ CX, CX		// save CF
+	NEGQ CX
 	MOVQ R11, 0(R10)(SI*8)
 	MOVQ R12, 8(R10)(SI*8)
 	MOVQ R13, 16(R10)(SI*8)
@@ -236,8 +239,8 @@ L4:	// n > 0
 	MOVQ 0(R8)(SI*8), R11
 	SUBQ CX, R11
 	MOVQ R11, 0(R10)(SI*8)
-	ZERO_CX
-	RCLQ $1, CX		// c = CF
+	SBBQ CX, CX		// save CF
+	NEGQ CX
 
 	ADDQ $1, SI		// i++
 	SUBQ $1, DI		// n--
@@ -245,6 +248,8 @@ L4:	// n > 0
 
 E4:	MOVQ CX, c+56(FP)	// return c
 	RET
+large:
+	JMP ·subVWlarge(SB)
 
 
 // func shlVU(z, x []Word, s uint) (c Word)
@@ -259,7 +264,7 @@ TEXT ·shlVU(SB),NOSPLIT,$0
 	MOVQ s+48(FP), CX
 	MOVQ (R8)(BX*8), AX	// w1 = x[n-1]
 	MOVQ $0, DX
-	SHLQ CX, DX:AX		// w1>>ŝ
+	SHLQ CX, AX, DX		// w1>>ŝ
 	MOVQ DX, c+56(FP)
 
 	CMPQ BX, $0
@@ -268,7 +273,7 @@ TEXT ·shlVU(SB),NOSPLIT,$0
 	// i > 0
 L8:	MOVQ AX, DX		// w = w1
 	MOVQ -8(R8)(BX*8), AX	// w1 = x[i-1]
-	SHLQ CX, DX:AX		// w<<s | w1>>ŝ
+	SHLQ CX, AX, DX		// w<<s | w1>>ŝ
 	MOVQ DX, (R10)(BX*8)	// z[i] = w<<s | w1>>ŝ
 	SUBQ $1, BX		// i--
 	JG L8			// i > 0
@@ -294,7 +299,7 @@ TEXT ·shrVU(SB),NOSPLIT,$0
 	MOVQ s+48(FP), CX
 	MOVQ (R8), AX		// w1 = x[0]
 	MOVQ $0, DX
-	SHRQ CX, DX:AX		// w1<<ŝ
+	SHRQ CX, AX, DX		// w1<<ŝ
 	MOVQ DX, c+56(FP)
 
 	MOVQ $0, BX		// i = 0
@@ -303,10 +308,10 @@ TEXT ·shrVU(SB),NOSPLIT,$0
 	// i < n-1
 L9:	MOVQ AX, DX		// w = w1
 	MOVQ 8(R8)(BX*8), AX	// w1 = x[i+1]
-	SHRQ CX, DX:AX		// w>>s | w1<<ŝ
+	SHRQ CX, AX, DX		// w>>s | w1<<ŝ
 	MOVQ DX, (R10)(BX*8)	// z[i] = w>>s | w1<<ŝ
 	ADDQ $1, BX		// i++
-	
+
 E9:	CMPQ BX, R11
 	JL L9			// i < n-1
 
@@ -327,6 +332,41 @@ TEXT ·mulAddVWW(SB),NOSPLIT,$0
 	MOVQ r+56(FP), CX	// c = r
 	MOVQ z_len+8(FP), R11
 	MOVQ $0, BX		// i = 0
+
+	CMPQ R11, $4
+	JL E5
+
+U5:	// i+4 <= n
+	// regular loop body unrolled 4x
+	MOVQ (0*8)(R8)(BX*8), AX
+	MULQ R9
+	ADDQ CX, AX
+	ADCQ $0, DX
+	MOVQ AX, (0*8)(R10)(BX*8)
+	MOVQ DX, CX
+	MOVQ (1*8)(R8)(BX*8), AX
+	MULQ R9
+	ADDQ CX, AX
+	ADCQ $0, DX
+	MOVQ AX, (1*8)(R10)(BX*8)
+	MOVQ DX, CX
+	MOVQ (2*8)(R8)(BX*8), AX
+	MULQ R9
+	ADDQ CX, AX
+	ADCQ $0, DX
+	MOVQ AX, (2*8)(R10)(BX*8)
+	MOVQ DX, CX
+	MOVQ (3*8)(R8)(BX*8), AX
+	MULQ R9
+	ADDQ CX, AX
+	ADCQ $0, DX
+	MOVQ AX, (3*8)(R10)(BX*8)
+	MOVQ DX, CX
+	ADDQ $4, BX		// i += 4
+
+	LEAQ 4(BX), DX
+	CMPQ DX, R11
+	JLE U5
 	JMP E5
 
 L5:	MOVQ (R8)(BX*8), AX
@@ -346,12 +386,42 @@ E5:	CMPQ BX, R11		// i < n
 
 // func addMulVVW(z, x []Word, y Word) (c Word)
 TEXT ·addMulVVW(SB),NOSPLIT,$0
+	CMPB    ·support_adx(SB), $1
+	JEQ adx
 	MOVQ z+0(FP), R10
 	MOVQ x+24(FP), R8
 	MOVQ y+48(FP), R9
 	MOVQ z_len+8(FP), R11
 	MOVQ $0, BX		// i = 0
 	MOVQ $0, CX		// c = 0
+	MOVQ R11, R12
+	ANDQ $-2, R12
+	CMPQ R11, $2
+	JAE A6
+	JMP E6
+
+A6:
+	MOVQ (R8)(BX*8), AX
+	MULQ R9
+	ADDQ (R10)(BX*8), AX
+	ADCQ $0, DX
+	ADDQ CX, AX
+	ADCQ $0, DX
+	MOVQ DX, CX
+	MOVQ AX, (R10)(BX*8)
+
+	MOVQ (8)(R8)(BX*8), AX
+	MULQ R9
+	ADDQ (8)(R10)(BX*8), AX
+	ADCQ $0, DX
+	ADDQ CX, AX
+	ADCQ $0, DX
+	MOVQ DX, CX
+	MOVQ AX, (8)(R10)(BX*8)
+
+	ADDQ $2, BX
+	CMPQ BX, R12
+	JL A6
 	JMP E6
 
 L6:	MOVQ (R8)(BX*8), AX
@@ -368,6 +438,97 @@ E6:	CMPQ BX, R11		// i < n
 
 	MOVQ CX, c+56(FP)
 	RET
+
+adx:
+	MOVQ z_len+8(FP), R11
+	MOVQ z+0(FP), R10
+	MOVQ x+24(FP), R8
+	MOVQ y+48(FP), DX
+	MOVQ $0, BX   // i = 0
+	MOVQ $0, CX   // carry
+	CMPQ R11, $8
+	JAE  adx_loop_header
+	CMPQ BX, R11
+	JL adx_short
+	MOVQ CX, c+56(FP)
+	RET
+
+adx_loop_header:
+	MOVQ  R11, R13
+	ANDQ  $-8, R13
+adx_loop:
+	XORQ  R9, R9  // unset flags
+	MULXQ (R8), SI, DI
+	ADCXQ CX,SI
+	ADOXQ (R10), SI
+	MOVQ  SI,(R10)
+
+	MULXQ 8(R8), AX, CX
+	ADCXQ DI, AX
+	ADOXQ 8(R10), AX
+	MOVQ  AX, 8(R10)
+
+	MULXQ 16(R8), SI, DI
+	ADCXQ CX, SI
+	ADOXQ 16(R10), SI
+	MOVQ  SI, 16(R10)
+
+	MULXQ 24(R8), AX, CX
+	ADCXQ DI, AX
+	ADOXQ 24(R10), AX
+	MOVQ  AX, 24(R10)
+
+	MULXQ 32(R8), SI, DI
+	ADCXQ CX, SI
+	ADOXQ 32(R10), SI
+	MOVQ  SI, 32(R10)
+
+	MULXQ 40(R8), AX, CX
+	ADCXQ DI, AX
+	ADOXQ 40(R10), AX
+	MOVQ  AX, 40(R10)
+
+	MULXQ 48(R8), SI, DI
+	ADCXQ CX, SI
+	ADOXQ 48(R10), SI
+	MOVQ  SI, 48(R10)
+
+	MULXQ 56(R8), AX, CX
+	ADCXQ DI, AX
+	ADOXQ 56(R10), AX
+	MOVQ  AX, 56(R10)
+
+	ADCXQ R9, CX
+	ADOXQ R9, CX
+
+	ADDQ $64, R8
+	ADDQ $64, R10
+	ADDQ $8, BX
+
+	CMPQ BX, R13
+	JL adx_loop
+	MOVQ z+0(FP), R10
+	MOVQ x+24(FP), R8
+	CMPQ BX, R11
+	JL adx_short
+	MOVQ CX, c+56(FP)
+	RET
+
+adx_short:
+	MULXQ (R8)(BX*8), SI, DI
+	ADDQ CX, SI
+	ADCQ $0, DI
+	ADDQ SI, (R10)(BX*8)
+	ADCQ $0, DI
+	MOVQ DI, CX
+	ADDQ $1, BX		// i++
+
+	CMPQ BX, R11
+	JL adx_short
+
+	MOVQ CX, c+56(FP)
+	RET
+
 
 
 // func divWVW(z []Word, xn Word, x []Word, y Word) (r Word)
@@ -387,15 +548,4 @@ E7:	SUBQ $1, BX		// i--
 	JGE L7			// i >= 0
 
 	MOVQ DX, r+64(FP)
-	RET
-
-// func bitLen(x Word) (n int)
-TEXT ·bitLen(SB),NOSPLIT,$0
-	BSRQ x+0(FP), AX
-	JZ Z1
-	ADDQ $1, AX
-	MOVQ AX, n+8(FP)
-	RET
-
-Z1:	MOVQ $0, n+8(FP)
 	RET
