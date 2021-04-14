@@ -19,52 +19,74 @@ fi
 
 sete=false
 if [ "$1" = "-e" ]; then
-    sete=true
-    shift
+	sete=true
+	shift
 fi
 
 if [ "$sete" = true ]; then
-    set -e
+	set -e
 fi
 
 pattern="$1"
 if [ "$pattern" = "" ]; then
-    pattern=.
+	pattern=.
 fi
 
 ./make.bash || exit 1
 GOROOT="$(cd .. && pwd)"
 
-# put linux, nacl first in the target list to get all the architectures up front.
-targets="$((../bin/go tool dist list | sed -n 's/^\(.*\)\/\(.*\)/\1-\2/p'; echo linux-386-387 linux-arm-arm5) | sort | egrep -v android-arm | egrep "$pattern" | egrep 'linux|nacl')
-$(../bin/go tool dist list | sed -n 's/^\(.*\)\/\(.*\)/\1-\2/p' | egrep -v 'android-arm|darwin-arm' | egrep "$pattern" | egrep -v 'linux|nacl')"
+gettargets() {
+	../bin/go tool dist list | sed -e 's|/|-|'
+	echo linux-386-387
+	echo linux-arm-arm5
+}
+
+selectedtargets() {
+	gettargets | egrep -v 'android-arm|darwin-arm64' | egrep "$pattern"
+}
+
+# put linux first in the target list to get all the architectures up front.
+linux_targets() {
+	selectedtargets | grep 'linux' | sort
+}
+
+non_linux_targets() {
+	selectedtargets | grep -v 'linux' | sort
+}
+
+# Note words in $targets are separated by both newlines and spaces.
+targets="$(linux_targets) $(non_linux_targets)"
 
 failed=false
 for target in $targets
 do
-    echo ""
-    echo "### Building $target"
-    export GOOS=$(echo $target | sed 's/-.*//')
-    export GOARCH=$(echo $target | sed 's/.*-//')
-    unset GO386 GOARM
-    if [ "$GOARCH" = "arm5" ]; then
-        export GOARCH=arm
-        export GOARM=5
-    fi
-    if [ "$GOARCH" = "387" ]; then
-        export GOARCH=386
-        export GO386=387
-    fi
-    if ! "$GOROOT/bin/go" build -a std cmd; then
-        failed=true
-        if $sete; then
-            exit 1
-        fi
-    fi
+	echo ""
+	echo "### Building $target"
+	export GOOS=$(echo $target | sed 's/-.*//')
+	export GOARCH=$(echo $target | sed 's/.*-//')
+	unset GO386 GOARM
+	if [ "$GOARCH" = "arm5" ]; then
+		export GOARCH=arm
+		export GOARM=5
+	fi
+	if [ "$GOARCH" = "387" ]; then
+		export GOARCH=386
+		export GO386=387
+	fi
+
+	# Build and vet everything.
+	# cmd/go/internal/work/exec.go enables the same vet flags during go test of std cmd
+	# and should be kept in sync with any vet flag changes here.
+	if ! "$GOROOT/bin/go" build std cmd || ! "$GOROOT/bin/go" vet -unsafeptr=false std cmd; then
+		failed=true
+		if $sete; then
+			exit 1
+		fi
+	fi
 done
 
 if [ "$failed" = "true" ]; then
-    echo "" 1>&2
-    echo "Build(s) failed." 1>&2
-    exit 1
+	echo "" 1>&2
+	echo "Build(s) failed." 1>&2
+	exit 1
 fi

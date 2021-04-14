@@ -76,7 +76,7 @@ TEXT runtime·setlasterror(SB),NOSPLIT,$0
 // exception record and context pointers.
 // Handler function is stored in AX.
 // Return 0 for 'not handled', -1 for handled.
-TEXT runtime·sigtramp(SB),NOSPLIT,$0-0
+TEXT sigtramp<>(SB),NOSPLIT,$0-0
 	MOVL	ptrs+0(FP), CX
 	SUBL	$40, SP
 
@@ -152,10 +152,10 @@ done:
 	// RET 4 (return and pop 4 bytes parameters)
 	BYTE $0xC2; WORD $4
 	RET // unreached; make assembler happy
- 
+
 TEXT runtime·exceptiontramp(SB),NOSPLIT,$0
 	MOVL	$runtime·exceptionhandler(SB), AX
-	JMP	runtime·sigtramp(SB)
+	JMP	sigtramp<>(SB)
 
 TEXT runtime·firstcontinuetramp(SB),NOSPLIT,$0-0
 	// is never called
@@ -163,17 +163,21 @@ TEXT runtime·firstcontinuetramp(SB),NOSPLIT,$0-0
 
 TEXT runtime·lastcontinuetramp(SB),NOSPLIT,$0-0
 	MOVL	$runtime·lastcontinuehandler(SB), AX
-	JMP	runtime·sigtramp(SB)
+	JMP	sigtramp<>(SB)
 
+// Called by OS using stdcall ABI: bool ctrlhandler(uint32).
 TEXT runtime·ctrlhandler(SB),NOSPLIT,$0
 	PUSHL	$runtime·ctrlhandler1(SB)
+	NOP	SP	// tell vet SP changed - stop checking offsets
 	CALL	runtime·externalthreadhandler(SB)
 	MOVL	4(SP), CX
 	ADDL	$12, SP
 	JMP	CX
 
+// Called by OS using stdcall ABI: uint32 profileloop(void*).
 TEXT runtime·profileloop(SB),NOSPLIT,$0
 	PUSHL	$runtime·profileloop1(SB)
+	NOP	SP	// tell vet SP changed - stop checking offsets
 	CALL	runtime·externalthreadhandler(SB)
 	MOVL	4(SP), CX
 	ADDL	$12, SP
@@ -232,7 +236,7 @@ TEXT runtime·externalthreadhandler(SB),NOSPLIT,$0
 
 GLOBL runtime·cbctxts(SB), NOPTR, $4
 
-TEXT runtime·callbackasm1+0(SB),NOSPLIT,$0
+TEXT runtime·callbackasm1(SB),NOSPLIT,$0
   	MOVL	0(SP), AX	// will use to find our callback context
 
 	// remove return address from stack, we are not returning there
@@ -308,14 +312,14 @@ TEXT runtime·callbackasm1+0(SB),NOSPLIT,$0
 	RET
 
 // void tstart(M *newm);
-TEXT runtime·tstart(SB),NOSPLIT,$0
+TEXT tstart<>(SB),NOSPLIT,$0
 	MOVL	newm+0(FP), CX		// m
 	MOVL	m_g0(CX), DX		// g
 
 	// Layout new m scheduler stack on os stack.
 	MOVL	SP, AX
 	MOVL	AX, (g_stack+stack_hi)(DX)
-	SUBL	$(64*1024), AX		// stack size
+	SUBL	$(64*1024), AX		// initial stack size (adjusted later)
 	MOVL	AX, (g_stack+stack_lo)(DX)
 	ADDL	$const__StackGuard, AX
 	MOVL	AX, g_stackguard0(DX)
@@ -340,7 +344,7 @@ TEXT runtime·tstart_stdcall(SB),NOSPLIT,$0
 	MOVL	newm+0(FP), BX
 
 	PUSHL	BX
-	CALL	runtime·tstart(SB)
+	CALL	tstart<>(SB)
 	POPL	BX
 
 	// Adjust stack for stdcall to return properly.
@@ -354,7 +358,7 @@ TEXT runtime·tstart_stdcall(SB),NOSPLIT,$0
 
 // setldt(int entry, int address, int limit)
 TEXT runtime·setldt(SB),NOSPLIT,$0
-	MOVL	address+4(FP), CX
+	MOVL	base+4(FP), CX
 	MOVL	CX, 0x14(FS)
 	RET
 
@@ -383,7 +387,7 @@ TEXT runtime·onosstack(SB),NOSPLIT,$0
 	MOVL	SI, m_libcallg(BP)
 	// sp must be the last, because once async cpu profiler finds
 	// all three values to be non-zero, it will use them
-	LEAL	usec+0(FP), SI
+	LEAL	fn+0(FP), SI
 	MOVL	SI, m_libcallsp(BP)
 
 	MOVL	m_g0(BP), SI
@@ -432,15 +436,108 @@ TEXT runtime·switchtothread(SB),NOSPLIT,$0
 	MOVL	BP, SP
 	RET
 
-// func now() (sec int64, nsec int32)
-TEXT time·now(SB),NOSPLIT,$8-12
-	CALL	runtime·unixnano(SB)
-	MOVL	0(SP), AX
-	MOVL	4(SP), DX
+// See https://www.dcl.hpi.uni-potsdam.de/research/WRK/2007/08/getting-os-information-the-kuser_shared_data-structure/
+// Must read hi1, then lo, then hi2. The snapshot is valid if hi1 == hi2.
+#define _INTERRUPT_TIME 0x7ffe0008
+#define _SYSTEM_TIME 0x7ffe0014
+#define time_lo 0
+#define time_hi1 4
+#define time_hi2 8
 
+TEXT runtime·nanotime1(SB),NOSPLIT,$0-8
+	CMPB	runtime·useQPCTime(SB), $0
+	JNE	useQPC
+loop:
+	MOVL	(_INTERRUPT_TIME+time_hi1), AX
+	MOVL	(_INTERRUPT_TIME+time_lo), CX
+	MOVL	(_INTERRUPT_TIME+time_hi2), DI
+	CMPL	AX, DI
+	JNE	loop
+
+	// wintime = DI:CX, multiply by 100
+	MOVL	$100, AX
+	MULL	CX
+	IMULL	$100, DI
+	ADDL	DI, DX
+	// wintime*100 = DX:AX
+	MOVL	AX, ret_lo+0(FP)
+	MOVL	DX, ret_hi+4(FP)
+	RET
+useQPC:
+	JMP	runtime·nanotimeQPC(SB)
+	RET
+
+TEXT time·now(SB),NOSPLIT,$0-20
+	CMPB	runtime·useQPCTime(SB), $0
+	JNE	useQPC
+loop:
+	MOVL	(_INTERRUPT_TIME+time_hi1), AX
+	MOVL	(_INTERRUPT_TIME+time_lo), CX
+	MOVL	(_INTERRUPT_TIME+time_hi2), DI
+	CMPL	AX, DI
+	JNE	loop
+
+	// w = DI:CX
+	// multiply by 100
+	MOVL	$100, AX
+	MULL	CX
+	IMULL	$100, DI
+	ADDL	DI, DX
+	// w*100 = DX:AX
+	MOVL	AX, mono+12(FP)
+	MOVL	DX, mono+16(FP)
+
+wall:
+	MOVL	(_SYSTEM_TIME+time_hi1), CX
+	MOVL	(_SYSTEM_TIME+time_lo), AX
+	MOVL	(_SYSTEM_TIME+time_hi2), DX
+	CMPL	CX, DX
+	JNE	wall
+
+	// w = DX:AX
+	// convert to Unix epoch (but still 100ns units)
+	#define delta 116444736000000000
+	SUBL	$(delta & 0xFFFFFFFF), AX
+	SBBL $(delta >> 32), DX
+
+	// nano/100 = DX:AX
+	// split into two decimal halves by div 1e9.
+	// (decimal point is two spots over from correct place,
+	// but we avoid overflow in the high word.)
 	MOVL	$1000000000, CX
 	DIVL	CX
+	MOVL	AX, DI
+	MOVL	DX, SI
+
+	// DI = nano/100/1e9 = nano/1e11 = sec/100, DX = SI = nano/100%1e9
+	// split DX into seconds and nanoseconds by div 1e7 magic multiply.
+	MOVL	DX, AX
+	MOVL	$1801439851, CX
+	MULL	CX
+	SHRL	$22, DX
+	MOVL	DX, BX
+	IMULL	$10000000, DX
+	MOVL	SI, CX
+	SUBL	DX, CX
+
+	// DI = sec/100 (still)
+	// BX = (nano/100%1e9)/1e7 = (nano/1e9)%100 = sec%100
+	// CX = (nano/100%1e9)%1e7 = (nano%1e9)/100 = nsec/100
+	// store nsec for return
+	IMULL	$100, CX
+	MOVL	CX, nsec+8(FP)
+
+	// DI = sec/100 (still)
+	// BX = sec%100
+	// construct DX:AX = 64-bit sec and store for return
+	MOVL	$0, DX
+	MOVL	$100, AX
+	MULL	DI
+	ADDL	BX, AX
+	ADCL	$0, DX
 	MOVL	AX, sec+0(FP)
-	MOVL	$0, sec+4(FP)
-	MOVL	DX, nsec+8(FP)
+	MOVL	DX, sec+4(FP)
+	RET
+useQPC:
+	JMP	runtime·nowQPC(SB)
 	RET

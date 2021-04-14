@@ -5,12 +5,16 @@
 package runtime_test
 
 import (
+	"flag"
 	"io"
 	. "runtime"
 	"runtime/debug"
+	"strings"
 	"testing"
 	"unsafe"
 )
+
+var flagQuick = flag.Bool("quick", false, "skip slow tests, for second run in all.bash")
 
 func init() {
 	// We're testing the runtime, so make tracebacks show things
@@ -49,6 +53,35 @@ func BenchmarkIfaceCmpNil100(b *testing.B) {
 	}
 }
 
+var efaceCmp1 interface{}
+var efaceCmp2 interface{}
+
+func BenchmarkEfaceCmpDiff(b *testing.B) {
+	x := 5
+	efaceCmp1 = &x
+	y := 6
+	efaceCmp2 = &y
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 100; j++ {
+			if efaceCmp1 == efaceCmp2 {
+				b.Fatal("bad comparison")
+			}
+		}
+	}
+}
+
+func BenchmarkEfaceCmpDiffIndirect(b *testing.B) {
+	efaceCmp1 = [2]int{1, 2}
+	efaceCmp2 = [2]int{1, 2}
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 100; j++ {
+			if efaceCmp1 != efaceCmp2 {
+				b.Fatal("bad comparison")
+			}
+		}
+	}
+}
+
 func BenchmarkDefer(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		defer1()
@@ -61,7 +94,6 @@ func defer1() {
 			panic("bad recover")
 		}
 	}(1, 2, 3)
-	return
 }
 
 func BenchmarkDefer10(b *testing.B) {
@@ -88,6 +120,21 @@ func BenchmarkDeferMany(b *testing.B) {
 			}
 		}(1, 2, 3)
 	}
+}
+
+func BenchmarkPanicRecover(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		defer3()
+	}
+}
+
+func defer3() {
+	defer func(x, y, z int) {
+		if recover() == nil {
+			panic("failed recover")
+		}
+	}(1, 2, 3)
+	panic("hi")
 }
 
 // golang.org/issue/7063
@@ -145,9 +192,13 @@ func TestSetPanicOnFault(t *testing.T) {
 	}
 }
 
+// testSetPanicOnFault tests one potentially faulting address.
+// It deliberately constructs and uses an invalid pointer,
+// so mark it as nocheckptr.
+//go:nocheckptr
 func testSetPanicOnFault(t *testing.T, addr uintptr, nfault *int) {
-	if GOOS == "nacl" {
-		t.Skip("nacl doesn't seem to fault on high addresses")
+	if GOOS == "js" {
+		t.Skip("js does not support catching faults")
 	}
 
 	defer func() {
@@ -179,9 +230,9 @@ func eqstring_generic(s1, s2 string) bool {
 }
 
 func TestEqString(t *testing.T) {
-	// This isn't really an exhaustive test of eqstring, it's
+	// This isn't really an exhaustive test of == on strings, it's
 	// just a convenient way of documenting (via eqstring_generic)
-	// what eqstring does.
+	// what == does.
 	s := []string{
 		"",
 		"a",
@@ -196,7 +247,7 @@ func TestEqString(t *testing.T) {
 			x := s1 == s2
 			y := eqstring_generic(s1, s2)
 			if x != y {
-				t.Errorf(`eqstring("%s","%s") = %t, want %t`, s1, s2, x, y)
+				t.Errorf(`("%s" == "%s") = %t, want %t`, s1, s2, x, y)
 			}
 		}
 	}
@@ -240,32 +291,6 @@ func TestTrailingZero(t *testing.T) {
 	}
 	if unsafe.Sizeof(T5{}) != 0 {
 		t.Errorf("sizeof(%#v)==%d, want 0", T5{}, unsafe.Sizeof(T5{}))
-	}
-}
-
-func TestBadOpen(t *testing.T) {
-	if GOOS == "windows" || GOOS == "nacl" {
-		t.Skip("skipping OS that doesn't have open/read/write/close")
-	}
-	// make sure we get the correct error code if open fails. Same for
-	// read/write/close on the resulting -1 fd. See issue 10052.
-	nonfile := []byte("/notreallyafile")
-	fd := Open(&nonfile[0], 0, 0)
-	if fd != -1 {
-		t.Errorf("open(\"%s\")=%d, want -1", string(nonfile), fd)
-	}
-	var buf [32]byte
-	r := Read(-1, unsafe.Pointer(&buf[0]), int32(len(buf)))
-	if r != -1 {
-		t.Errorf("read()=%d, want -1", r)
-	}
-	w := Write(^uintptr(0), unsafe.Pointer(&buf[0]), int32(len(buf)))
-	if w != -1 {
-		t.Errorf("write()=%d, want -1", w)
-	}
-	c := Close(-1)
-	if c != -1 {
-		t.Errorf("close()=%d, want -1", c)
 	}
 }
 
@@ -327,5 +352,13 @@ func TestGoroutineProfileTrivial(t *testing.T) {
 		if i >= 10 {
 			t.Fatalf("GoroutineProfile not converging")
 		}
+	}
+}
+
+func TestVersion(t *testing.T) {
+	// Test that version does not contain \r or \n.
+	vers := Version()
+	if strings.Contains(vers, "\r") || strings.Contains(vers, "\n") {
+		t.Fatalf("cr/nl in version: %q", vers)
 	}
 }

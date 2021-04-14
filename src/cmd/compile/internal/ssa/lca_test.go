@@ -6,24 +6,9 @@ package ssa
 
 import "testing"
 
-type lca interface {
-	find(a, b *Block) *Block
-}
-
-func lcaEqual(f *Func, lca1, lca2 lca) bool {
-	for _, b := range f.Blocks {
-		for _, c := range f.Blocks {
-			if lca1.find(b, c) != lca2.find(b, c) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func testLCAgen(t *testing.T, bg blockGen, size int) {
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry", bg(size)...)
+	c := testConfig(t)
+	fun := c.Fun("entry", bg(size)...)
 	CheckFunc(fun.f)
 	if size == 4 {
 		t.Logf(fun.f.String())

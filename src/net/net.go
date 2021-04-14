@@ -83,6 +83,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -94,12 +95,6 @@ var (
 	netGo  bool // set true in cgo_stub.go for build tag "netgo" (or no cgo)
 	netCgo bool // set true in conf_netcgo.go for build tag "netcgo"
 )
-
-func init() {
-	sysInit()
-	supportsIPv4 = probeIPv4Stack()
-	supportsIPv6, supportsIPv4map = probeIPv6Stack()
-}
 
 // Addr represents a network end point address.
 //
@@ -116,13 +111,13 @@ type Addr interface {
 // Multiple goroutines may invoke methods on a Conn simultaneously.
 type Conn interface {
 	// Read reads data from the connection.
-	// Read can be made to time out and return a Error with Timeout() == true
-	// after a fixed time limit; see SetDeadline and SetReadDeadline.
+	// Read can be made to time out and return an error after a fixed
+	// time limit; see SetDeadline and SetReadDeadline.
 	Read(b []byte) (n int, err error)
 
 	// Write writes data to the connection.
-	// Write can be made to time out and return a Error with Timeout() == true
-	// after a fixed time limit; see SetDeadline and SetWriteDeadline.
+	// Write can be made to time out and return an error after a fixed
+	// time limit; see SetDeadline and SetWriteDeadline.
 	Write(b []byte) (n int, err error)
 
 	// Close closes the connection.
@@ -140,10 +135,17 @@ type Conn interface {
 	// SetReadDeadline and SetWriteDeadline.
 	//
 	// A deadline is an absolute time after which I/O operations
-	// fail with a timeout (see type Error) instead of
-	// blocking. The deadline applies to all future and pending
-	// I/O, not just the immediately following call to Read or
-	// Write.
+	// fail instead of blocking. The deadline applies to all future
+	// and pending I/O, not just the immediately following call to
+	// Read or Write. After a deadline has been exceeded, the
+	// connection can be refreshed by setting a deadline in the future.
+	//
+	// If the deadline is exceeded a call to Read or Write or to other
+	// I/O methods will return an error that wraps os.ErrDeadlineExceeded.
+	// This can be tested using errors.Is(err, os.ErrDeadlineExceeded).
+	// The error's Timeout method will return true, but note that there
+	// are other possible errors for which the Timeout method will
+	// return true even if the deadline has not been exceeded.
 	//
 	// An idle timeout can be implemented by repeatedly extending
 	// the deadline after successful Read or Write calls.
@@ -233,7 +235,7 @@ func (c *conn) SetDeadline(t time.Time) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	if err := c.fd.setDeadline(t); err != nil {
+	if err := c.fd.SetDeadline(t); err != nil {
 		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
@@ -244,7 +246,7 @@ func (c *conn) SetReadDeadline(t time.Time) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	if err := c.fd.setReadDeadline(t); err != nil {
+	if err := c.fd.SetReadDeadline(t); err != nil {
 		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
@@ -255,7 +257,7 @@ func (c *conn) SetWriteDeadline(t time.Time) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	if err := c.fd.setWriteDeadline(t); err != nil {
+	if err := c.fd.SetWriteDeadline(t); err != nil {
 		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
 	}
 	return nil
@@ -285,7 +287,7 @@ func (c *conn) SetWriteBuffer(bytes int) error {
 	return nil
 }
 
-// File sets the underlying os.File to blocking mode and returns a copy.
+// File returns a copy of the underlying os.File.
 // It is the caller's responsibility to close f when finished.
 // Closing c does not affect f, and closing f does not affect c.
 //
@@ -305,20 +307,21 @@ func (c *conn) File() (f *os.File, err error) {
 // Multiple goroutines may invoke methods on a PacketConn simultaneously.
 type PacketConn interface {
 	// ReadFrom reads a packet from the connection,
-	// copying the payload into b. It returns the number of
-	// bytes copied into b and the return address that
+	// copying the payload into p. It returns the number of
+	// bytes copied into p and the return address that
 	// was on the packet.
-	// ReadFrom can be made to time out and return
-	// an error with Timeout() == true after a fixed time limit;
-	// see SetDeadline and SetReadDeadline.
-	ReadFrom(b []byte) (n int, addr Addr, err error)
+	// It returns the number of bytes read (0 <= n <= len(p))
+	// and any error encountered. Callers should always process
+	// the n > 0 bytes returned before considering the error err.
+	// ReadFrom can be made to time out and return an error after a
+	// fixed time limit; see SetDeadline and SetReadDeadline.
+	ReadFrom(p []byte) (n int, addr Addr, err error)
 
-	// WriteTo writes a packet with payload b to addr.
-	// WriteTo can be made to time out and return
-	// an error with Timeout() == true after a fixed time limit;
-	// see SetDeadline and SetWriteDeadline.
+	// WriteTo writes a packet with payload p to addr.
+	// WriteTo can be made to time out and return an Error after a
+	// fixed time limit; see SetDeadline and SetWriteDeadline.
 	// On packet-oriented connections, write timeouts are rare.
-	WriteTo(b []byte, addr Addr) (n int, err error)
+	WriteTo(p []byte, addr Addr) (n int, err error)
 
 	// Close closes the connection.
 	// Any blocked ReadFrom or WriteTo operations will be unblocked and return errors.
@@ -328,25 +331,51 @@ type PacketConn interface {
 	LocalAddr() Addr
 
 	// SetDeadline sets the read and write deadlines associated
-	// with the connection.
+	// with the connection. It is equivalent to calling both
+	// SetReadDeadline and SetWriteDeadline.
+	//
+	// A deadline is an absolute time after which I/O operations
+	// fail instead of blocking. The deadline applies to all future
+	// and pending I/O, not just the immediately following call to
+	// Read or Write. After a deadline has been exceeded, the
+	// connection can be refreshed by setting a deadline in the future.
+	//
+	// If the deadline is exceeded a call to Read or Write or to other
+	// I/O methods will return an error that wraps os.ErrDeadlineExceeded.
+	// This can be tested using errors.Is(err, os.ErrDeadlineExceeded).
+	// The error's Timeout method will return true, but note that there
+	// are other possible errors for which the Timeout method will
+	// return true even if the deadline has not been exceeded.
+	//
+	// An idle timeout can be implemented by repeatedly extending
+	// the deadline after successful ReadFrom or WriteTo calls.
+	//
+	// A zero value for t means I/O operations will not time out.
 	SetDeadline(t time.Time) error
 
-	// SetReadDeadline sets the deadline for future Read calls.
-	// If the deadline is reached, Read will fail with a timeout
-	// (see type Error) instead of blocking.
-	// A zero value for t means Read will not time out.
+	// SetReadDeadline sets the deadline for future ReadFrom calls
+	// and any currently-blocked ReadFrom call.
+	// A zero value for t means ReadFrom will not time out.
 	SetReadDeadline(t time.Time) error
 
-	// SetWriteDeadline sets the deadline for future Write calls.
-	// If the deadline is reached, Write will fail with a timeout
-	// (see type Error) instead of blocking.
-	// A zero value for t means Write will not time out.
+	// SetWriteDeadline sets the deadline for future WriteTo calls
+	// and any currently-blocked WriteTo call.
 	// Even if write times out, it may return n > 0, indicating that
 	// some of the data was successfully written.
+	// A zero value for t means WriteTo will not time out.
 	SetWriteDeadline(t time.Time) error
 }
 
-var listenerBacklog = maxListenerBacklog()
+var listenerBacklogCache struct {
+	sync.Once
+	val int
+}
+
+// listenerBacklog is a caching wrapper around maxListenerBacklog.
+func listenerBacklog() int {
+	listenerBacklogCache.Do(func() { listenerBacklogCache.val = maxListenerBacklog() })
+	return listenerBacklogCache.val
+}
 
 // A Listener is a generic network listener for stream-oriented protocols.
 //
@@ -379,10 +408,8 @@ var (
 	errMissingAddress = errors.New("missing address")
 
 	// For both read and write operations.
-	errTimeout          error = &timeoutError{}
-	errCanceled               = errors.New("operation was canceled")
-	errClosing                = errors.New("use of closed network connection")
-	ErrWriteToConnected       = errors.New("use of WriteTo with pre-connected connection")
+	errCanceled         = errors.New("operation was canceled")
+	ErrWriteToConnected = errors.New("use of WriteTo with pre-connected connection")
 )
 
 // mapErr maps from the context errors to the historical internal net
@@ -427,8 +454,11 @@ type OpError struct {
 	Addr Addr
 
 	// Err is the error that occurred during the operation.
+	// The Error method panics if the error is nil.
 	Err error
 }
+
+func (e *OpError) Unwrap() error { return e.Err }
 
 func (e *OpError) Error() string {
 	if e == nil {
@@ -455,8 +485,8 @@ func (e *OpError) Error() string {
 
 var (
 	// aLongTimeAgo is a non-zero time, far in the past, used for
-	// immediate cancelation of dials.
-	aLongTimeAgo = time.Unix(233431200, 0)
+	// immediate cancellation of dials.
+	aLongTimeAgo = time.Unix(1, 0)
 
 	// nonDeadline and noCancel are just zero values for
 	// readability with functions taking too many parameters.
@@ -482,6 +512,12 @@ type temporary interface {
 }
 
 func (e *OpError) Temporary() bool {
+	// Treat ECONNRESET and ECONNABORTED as temporary errors when
+	// they come from calling accept. See issue 6163.
+	if e.Op == "accept" && isConnError(e.Err) {
+		return true
+	}
+
 	if ne, ok := e.Err.(*os.SyscallError); ok {
 		t, ok := ne.Err.(temporary)
 		return ok && t.Temporary()
@@ -489,12 +525,6 @@ func (e *OpError) Temporary() bool {
 	t, ok := e.Err.(temporary)
 	return ok && t.Temporary()
 }
-
-type timeoutError struct{}
-
-func (e *timeoutError) Error() string   { return "i/o timeout" }
-func (e *timeoutError) Timeout() bool   { return true }
-func (e *timeoutError) Temporary() bool { return true }
 
 // A ParseError is the error type of literal network address parsers.
 type ParseError struct {
@@ -519,7 +549,7 @@ func (e *AddrError) Error() string {
 	}
 	s := e.Err
 	if e.Addr != "" {
-		s += " " + e.Addr
+		s = "address " + e.Addr + ": " + s
 	}
 	return s
 }
@@ -539,12 +569,28 @@ func (e InvalidAddrError) Error() string   { return string(e) }
 func (e InvalidAddrError) Timeout() bool   { return false }
 func (e InvalidAddrError) Temporary() bool { return false }
 
+// errTimeout exists to return the historical "i/o timeout" string
+// for context.DeadlineExceeded. See mapErr.
+// It is also used when Dialer.Deadline is exceeded.
+//
+// TODO(iant): We could consider changing this to os.ErrDeadlineExceeded
+// in the future, but note that that would conflict with the TODO
+// at mapErr that suggests changing it to context.DeadlineExceeded.
+var errTimeout error = &timeoutError{}
+
+type timeoutError struct{}
+
+func (e *timeoutError) Error() string   { return "i/o timeout" }
+func (e *timeoutError) Timeout() bool   { return true }
+func (e *timeoutError) Temporary() bool { return true }
+
 // DNSConfigError represents an error reading the machine's DNS configuration.
 // (No longer used; kept for compatibility.)
 type DNSConfigError struct {
 	Err error
 }
 
+func (e *DNSConfigError) Unwrap() error   { return e.Err }
 func (e *DNSConfigError) Error() string   { return "error reading DNS config: " + e.Err.Error() }
 func (e *DNSConfigError) Timeout() bool   { return false }
 func (e *DNSConfigError) Temporary() bool { return false }
@@ -561,6 +607,7 @@ type DNSError struct {
 	Server      string // server used
 	IsTimeout   bool   // if true, timed out; not all timeouts set this
 	IsTemporary bool   // if true, error is temporary; not all errors set this
+	IsNotFound  bool   // if true, host could not be found
 }
 
 func (e *DNSError) Error() string {
@@ -602,9 +649,14 @@ func genericReadFrom(w io.Writer, r io.Reader) (n int64, err error) {
 // server is not responding. Then the many lookups each use a different
 // thread, and the system or the program runs out of threads.
 
-var threadLimit = make(chan struct{}, 500)
+var threadLimit chan struct{}
+
+var threadOnce sync.Once
 
 func acquireThread() {
+	threadOnce.Do(func() {
+		threadLimit = make(chan struct{}, concurrentThreadsLimit())
+	})
 	threadLimit <- struct{}{}
 }
 
@@ -619,8 +671,6 @@ func releaseThread() {
 type buffersWriter interface {
 	writeBuffers(*Buffers) (int64, error)
 }
-
-var testHookDidWritev = func(wrote int) {}
 
 // Buffers contains zero or more runs of bytes to write.
 //

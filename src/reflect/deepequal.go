@@ -33,18 +33,42 @@ func deepValueEqual(v1, v2 Value, visited map[visit]bool, depth int) bool {
 
 	// We want to avoid putting more in the visited map than we need to.
 	// For any possible reference cycle that might be encountered,
-	// hard(t) needs to return true for at least one of the types in the cycle.
-	hard := func(k Kind) bool {
-		switch k {
-		case Map, Slice, Ptr, Interface:
-			return true
+	// hard(v1, v2) needs to return true for at least one of the types in the cycle,
+	// and it's safe and valid to get Value's internal pointer.
+	hard := func(v1, v2 Value) bool {
+		switch v1.Kind() {
+		case Ptr:
+			if v1.typ.ptrdata == 0 {
+				// go:notinheap pointers can't be cyclic.
+				// At least, all of our current uses of go:notinheap have
+				// that property. The runtime ones aren't cyclic (and we don't use
+				// DeepEqual on them anyway), and the cgo-generated ones are
+				// all empty structs.
+				return false
+			}
+			fallthrough
+		case Map, Slice, Interface:
+			// Nil pointers cannot be cyclic. Avoid putting them in the visited map.
+			return !v1.IsNil() && !v2.IsNil()
 		}
 		return false
 	}
 
-	if v1.CanAddr() && v2.CanAddr() && hard(v1.Kind()) {
-		addr1 := unsafe.Pointer(v1.UnsafeAddr())
-		addr2 := unsafe.Pointer(v2.UnsafeAddr())
+	if hard(v1, v2) {
+		// For a Ptr or Map value, we need to check flagIndir,
+		// which we do by calling the pointer method.
+		// For Slice or Interface, flagIndir is always set,
+		// and using v.ptr suffices.
+		ptrval := func(v Value) unsafe.Pointer {
+			switch v.Kind() {
+			case Ptr, Map:
+				return v.pointer()
+			default:
+				return v.ptr
+			}
+		}
+		addr1 := ptrval(v1)
+		addr2 := ptrval(v2)
 		if uintptr(addr1) > uintptr(addr2) {
 			// Canonicalize order to reduce number of entries in visited.
 			// Assumes non-moving garbage collector.
@@ -116,7 +140,7 @@ func deepValueEqual(v1, v2 Value, visited map[visit]bool, depth int) bool {
 		for _, k := range v1.MapKeys() {
 			val1 := v1.MapIndex(k)
 			val2 := v2.MapIndex(k)
-			if !val1.IsValid() || !val2.IsValid() || !deepValueEqual(v1.MapIndex(k), v2.MapIndex(k), visited, depth+1) {
+			if !val1.IsValid() || !val2.IsValid() || !deepValueEqual(val1, val2, visited, depth+1) {
 				return false
 			}
 		}
@@ -178,6 +202,12 @@ func deepValueEqual(v1, v2 Value, visited map[visit]bool, depth int) bool {
 // DeepEqual has been defined so that the same short-cut applies
 // to slices and maps: if x and y are the same slice or the same map,
 // they are deeply equal regardless of content.
+//
+// As DeepEqual traverses the data values it may find a cycle. The
+// second and subsequent times that DeepEqual compares two pointer
+// values that have been compared before, it treats the values as
+// equal rather than examining the values to which they point.
+// This ensures that DeepEqual terminates.
 func DeepEqual(x, y interface{}) bool {
 	if x == nil || y == nil {
 		return x == y

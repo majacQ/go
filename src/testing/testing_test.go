@@ -5,42 +5,76 @@
 package testing_test
 
 import (
-	"fmt"
+	"io/ioutil"
 	"os"
-	"runtime"
+	"path/filepath"
 	"testing"
-	"time"
 )
 
+// This is exactly what a test would do without a TestMain.
+// It's here only so that there is at least one package in the
+// standard library with a TestMain, so that code is executed.
+
 func TestMain(m *testing.M) {
-	g0 := runtime.NumGoroutine()
-
-	code := m.Run()
-	if code != 0 {
-		os.Exit(code)
-	}
-
-	// Check that there are no goroutines left behind.
-	t0 := time.Now()
-	stacks := make([]byte, 1<<20)
-	for {
-		g1 := runtime.NumGoroutine()
-		if g1 == g0 {
-			return
-		}
-		stacks = stacks[:runtime.Stack(stacks, true)]
-		time.Sleep(50 * time.Millisecond)
-		if time.Since(t0) > 2*time.Second {
-			fmt.Fprintf(os.Stderr, "Unexpected leftover goroutines detected: %v -> %v\n%s\n", g0, g1, stacks)
-			os.Exit(1)
-		}
-	}
+	os.Exit(m.Run())
 }
 
-func TestContextCancel(t *testing.T) {
-	ctx := t.Context()
-	// Tests we don't leak this goroutine:
-	go func() {
-		<-ctx.Done()
-	}()
+func TestTempDir(t *testing.T) {
+	testTempDir(t)
+	t.Run("InSubtest", testTempDir)
+	t.Run("test/subtest", testTempDir)
+	t.Run("test\\subtest", testTempDir)
+	t.Run("test:subtest", testTempDir)
+	t.Run("test/..", testTempDir)
+	t.Run("../test", testTempDir)
+}
+
+func testTempDir(t *testing.T) {
+	dirCh := make(chan string, 1)
+	t.Cleanup(func() {
+		// Verify directory has been removed.
+		select {
+		case dir := <-dirCh:
+			fi, err := os.Stat(dir)
+			if os.IsNotExist(err) {
+				// All good
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Errorf("directory %q stil exists: %v, isDir=%v", dir, fi, fi.IsDir())
+		default:
+			if !t.Failed() {
+				t.Fatal("never received dir channel")
+			}
+		}
+	})
+
+	dir := t.TempDir()
+	if dir == "" {
+		t.Fatal("expected dir")
+	}
+	dir2 := t.TempDir()
+	if dir == dir2 {
+		t.Fatal("subsequent calls to TempDir returned the same directory")
+	}
+	if filepath.Dir(dir) != filepath.Dir(dir2) {
+		t.Fatalf("calls to TempDir do not share a parent; got %q, %q", dir, dir2)
+	}
+	dirCh <- dir
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.IsDir() {
+		t.Errorf("dir %q is not a dir", dir)
+	}
+	fis, err := ioutil.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fis) > 0 {
+		t.Errorf("unexpected %d files in TempDir: %v", len(fis), fis)
+	}
 }

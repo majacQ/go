@@ -8,36 +8,36 @@ package syntax
 // Nodes
 
 type Node interface {
-	Line() uint32
+	// Pos() returns the position associated with the node as follows:
+	// 1) The position of a node representing a terminal syntax production
+	//    (Name, BasicLit, etc.) is the position of the respective production
+	//    in the source.
+	// 2) The position of a node representing a non-terminal production
+	//    (IndexExpr, IfStmt, etc.) is the position of a token uniquely
+	//    associated with that production; usually the left-most one
+	//    ('[' for IndexExpr, 'if' for IfStmt, etc.)
+	Pos() Pos
 	aNode()
-	init(p *parser)
 }
 
 type node struct {
-	doc  *Comment // nil means no comment(s) attached
-	pos  uint32
-	line uint32
+	// commented out for now since not yet used
+	// doc  *Comment // nil means no comment(s) attached
+	pos Pos
 }
 
-func (*node) aNode() {}
-
-func (n *node) Line() uint32 {
-	return n.line
-}
-
-func (n *node) init(p *parser) {
-	n.pos = uint32(p.pos)
-	n.line = uint32(p.line)
-}
+func (n *node) Pos() Pos { return n.pos }
+func (*node) aNode()     {}
 
 // ----------------------------------------------------------------------------
 // Files
 
 // package PkgName; DeclList[0], DeclList[1], ...
 type File struct {
+	Pragma   Pragma
 	PkgName  *Name
 	DeclList []Decl
-	Lines    int
+	Lines    uint
 	node
 }
 
@@ -53,9 +53,10 @@ type (
 	//              Path
 	// LocalPkgName Path
 	ImportDecl struct {
+		Group        *Group // nil means not part of a group
+		Pragma       Pragma
 		LocalPkgName *Name // including "."; nil means no rename present
 		Path         *BasicLit
-		Group        *Group // nil means not part of a group
 		decl
 	}
 
@@ -63,19 +64,21 @@ type (
 	// NameList      = Values
 	// NameList Type = Values
 	ConstDecl struct {
-		NameList []*Name
-		Type     Expr   // nil means no type
-		Values   Expr   // nil means no values
 		Group    *Group // nil means not part of a group
+		Pragma   Pragma
+		NameList []*Name
+		Type     Expr // nil means no type
+		Values   Expr // nil means no values
 		decl
 	}
 
 	// Name Type
 	TypeDecl struct {
-		Name   *Name
-		Type   Expr
 		Group  *Group // nil means not part of a group
 		Pragma Pragma
+		Name   *Name
+		Alias  bool
+		Type   Expr
 		decl
 	}
 
@@ -83,10 +86,11 @@ type (
 	// NameList Type = Values
 	// NameList      = Values
 	VarDecl struct {
-		NameList []*Name
-		Type     Expr   // nil means no type
-		Values   Expr   // nil means no values
 		Group    *Group // nil means not part of a group
+		Pragma   Pragma
+		NameList []*Name
+		Type     Expr // nil means no type
+		Values   Expr // nil means no values
 		decl
 	}
 
@@ -95,13 +99,11 @@ type (
 	// func Receiver Name Type { Body }
 	// func Receiver Name Type
 	FuncDecl struct {
-		Attr    map[string]bool // go:attr map
-		Recv    *Field          // nil means regular function
-		Name    *Name
-		Type    *FuncType
-		Body    []Stmt // nil means no body (forward declaration)
-		Pragma  Pragma // TODO(mdempsky): Cleaner solution.
-		EndLine uint32 // TODO(mdempsky): Cleaner solution.
+		Pragma Pragma
+		Recv   *Field // nil means regular function
+		Name   *Name
+		Type   *FuncType
+		Body   *BlockStmt // nil means no body (forward declaration)
 		decl
 	}
 )
@@ -124,6 +126,12 @@ type (
 		aExpr()
 	}
 
+	// Placeholder for an expression that failed to parse
+	// correctly and where we can't provide a better node.
+	BadExpr struct {
+		expr
+	}
+
 	// Value
 	Name struct {
 		Value string
@@ -134,6 +142,7 @@ type (
 	BasicLit struct {
 		Value string
 		Kind  LitKind
+		Bad   bool // true means the literal Value has syntax errors
 		expr
 	}
 
@@ -141,8 +150,8 @@ type (
 	CompositeLit struct {
 		Type     Expr // nil means no literal type
 		ElemList []Expr
-		NKeys    int    // number of elements with keys
-		EndLine  uint32 // TODO(mdempsky): Cleaner solution.
+		NKeys    int // number of elements with keys
+		Rbrace   Pos
 		expr
 	}
 
@@ -154,9 +163,8 @@ type (
 
 	// func Type { Body }
 	FuncLit struct {
-		Type    *FuncType
-		Body    []Stmt
-		EndLine uint32 // TODO(mdempsky): Cleaner solution.
+		Type *FuncType
+		Body *BlockStmt
 		expr
 	}
 
@@ -194,9 +202,16 @@ type (
 
 	// X.(Type)
 	AssertExpr struct {
-		X Expr
-		// TODO(gri) consider using Name{"..."} instead of nil (permits attaching of comments)
+		X    Expr
 		Type Expr
+		expr
+	}
+
+	// X.(type)
+	// Lhs := X.(type)
+	TypeSwitchGuard struct {
+		Lhs *Name // nil means no Lhs :=
+		X   Expr  // X.(type)
 		expr
 	}
 
@@ -209,8 +224,8 @@ type (
 	// Fun(ArgList[0], ArgList[1], ...)
 	CallExpr struct {
 		Fun     Expr
-		ArgList []Expr
-		HasDots bool // last argument is followed by ...
+		ArgList []Expr // nil means no arguments
+		HasDots bool   // last argument is followed by ...
 		expr
 	}
 
@@ -269,8 +284,7 @@ type (
 
 	// map[Key]Value
 	MapType struct {
-		Key   Expr
-		Value Expr
+		Key, Value Expr
 		expr
 	}
 
@@ -321,7 +335,8 @@ type (
 	}
 
 	BlockStmt struct {
-		Body []Stmt
+		List   []Stmt
+		Rbrace Pos
 		stmt
 	}
 
@@ -349,6 +364,12 @@ type (
 	BranchStmt struct {
 		Tok   token // Break, Continue, Fallthrough, or Goto
 		Label *Name
+		// Target is the continuation of the control flow after executing
+		// the branch; it is computed by the parser if CheckBranches is set.
+		// Target is a *LabeledStmt for gotos, and a *SwitchStmt, *SelectStmt,
+		// or *ForStmt for breaks and continues, depending on the context of
+		// the branch. Target is not set for fallthroughs.
+		Target Stmt
 		stmt
 	}
 
@@ -366,8 +387,8 @@ type (
 	IfStmt struct {
 		Init SimpleStmt
 		Cond Expr
-		Then []Stmt
-		Else Stmt // either *IfStmt or *BlockStmt
+		Then *BlockStmt
+		Else Stmt // either nil, *IfStmt, or *BlockStmt
 		stmt
 	}
 
@@ -375,19 +396,21 @@ type (
 		Init SimpleStmt // incl. *RangeClause
 		Cond Expr
 		Post SimpleStmt
-		Body []Stmt
+		Body *BlockStmt
 		stmt
 	}
 
 	SwitchStmt struct {
-		Init SimpleStmt
-		Tag  Expr
-		Body []*CaseClause
+		Init   SimpleStmt
+		Tag    Expr // incl. *TypeSwitchGuard
+		Body   []*CaseClause
+		Rbrace Pos
 		stmt
 	}
 
 	SelectStmt struct {
-		Body []*CommClause
+		Body   []*CommClause
+		Rbrace Pos
 		stmt
 	}
 )
@@ -400,22 +423,17 @@ type (
 		simpleStmt
 	}
 
-	TypeSwitchGuard struct {
-		// TODO(gri) consider using Name{"..."} instead of nil (permits attaching of comments)
-		Lhs *Name // nil means no Lhs :=
-		X   Expr  // X.(type)
-		expr
-	}
-
 	CaseClause struct {
 		Cases Expr // nil means default clause
 		Body  []Stmt
+		Colon Pos
 		node
 	}
 
 	CommClause struct {
-		Comm SimpleStmt // send or receive stmt; nil means default clause
-		Body []Stmt
+		Comm  SimpleStmt // send or receive stmt; nil means default clause
+		Body  []Stmt
+		Colon Pos
 		node
 	}
 )

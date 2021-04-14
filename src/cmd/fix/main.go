@@ -15,10 +15,11 @@ import (
 	"go/token"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"cmd/internal/diff"
 )
 
 var (
@@ -51,7 +52,7 @@ func usage() {
 			fmt.Fprintf(os.Stderr, "\n%s\n", f.name)
 		}
 		desc := strings.TrimSpace(f.desc)
-		desc = strings.Replace(desc, "\n", "\n\t", -1)
+		desc = strings.ReplaceAll(desc, "\n", "\n\t")
 		fmt.Fprintf(os.Stderr, "\t%s\n", desc)
 	}
 	os.Exit(2)
@@ -185,7 +186,7 @@ func processFile(filename string, useStdin bool) error {
 	}
 
 	if *doDiff {
-		data, err := diff(src, newSrc)
+		data, err := diff.Diff("go-fix", src, newSrc)
 		if err != nil {
 			return fmt.Errorf("computing diff: %s", err)
 		}
@@ -202,10 +203,8 @@ func processFile(filename string, useStdin bool) error {
 	return ioutil.WriteFile(f.Name(), newSrc, 0)
 }
 
-var gofmtBuf bytes.Buffer
-
 func gofmt(n interface{}) string {
-	gofmtBuf.Reset()
+	var gofmtBuf bytes.Buffer
 	if err := format.Node(&gofmtBuf, fset, n); err != nil {
 		return "<" + err.Error() + ">"
 	}
@@ -235,31 +234,4 @@ func isGoFile(f os.FileInfo) bool {
 	// ignore non-Go files
 	name := f.Name()
 	return !f.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
-}
-
-func diff(b1, b2 []byte) (data []byte, err error) {
-	f1, err := ioutil.TempFile("", "go-fix")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(f1.Name())
-	defer f1.Close()
-
-	f2, err := ioutil.TempFile("", "go-fix")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(f2.Name())
-	defer f2.Close()
-
-	f1.Write(b1)
-	f2.Write(b2)
-
-	data, err = exec.Command("diff", "-u", f1.Name(), f2.Name()).CombinedOutput()
-	if len(data) > 0 {
-		// diff exits with a non-zero status when the files don't match.
-		// Ignore that failure as long as we get output.
-		err = nil
-	}
-	return
 }

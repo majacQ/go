@@ -6,7 +6,9 @@ package big
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"unicode"
 )
 
 var primes = []string{
@@ -27,13 +29,13 @@ var primes = []string{
 	"98920366548084643601728869055592650835572950932266967461790948584315647051443",
 	"94560208308847015747498523884063394671606671904944666360068158221458669711639",
 
-	// http://primes.utm.edu/lists/small/small3.html
+	// https://primes.utm.edu/lists/small/small3.html
 	"449417999055441493994709297093108513015373787049558499205492347871729927573118262811508386655998299074566974373711472560655026288668094291699357843464363003144674940345912431129144354948751003607115263071543163",
 	"230975859993204150666423538988557839555560243929065415434980904258310530753006723857139742334640122533598517597674807096648905501653461687601339782814316124971547968912893214002992086353183070342498989426570593",
 	"5521712099665906221540423207019333379125265462121169655563495403888449493493629943498064604536961775110765377745550377067893607246020694972959780839151452457728855382113555867743022746090187341871655890805971735385789993",
 	"203956878356401977405765866929034577280193993314348263094772646453283062722701277632936616063144088173312372882677123879538709400158306567338328279154499698366071906766440037074217117805690872792848149112022286332144876183376326512083574821647933992961249917319836219304274280243803104015000563790123",
 
-	// ECC primes: http://tools.ietf.org/html/draft-ladd-safecurves-02
+	// ECC primes: https://tools.ietf.org/html/draft-ladd-safecurves-02
 	"3618502788666131106986593281521497120414687020801267626233049500247285301239",                                                                                  // Curve1174: 2^251-9
 	"57896044618658097711785492504343953926634992332820282019728792003956564819949",                                                                                 // Curve25519: 2^255-19
 	"9850501549098619803069760025035903451269934817616361666987073351061430442874302652853566563721228910201656997576599",                                           // E-382: 2^382-105
@@ -48,6 +50,76 @@ var composites = []string{
 	"6084766654921918907427900243509372380954290099172559290432744450051395395951",
 	"84594350493221918389213352992032324280367711247940675652888030554255915464401",
 	"82793403787388584738507275144194252681",
+
+	// Arnault, "Rabin-Miller Primality Test: Composite Numbers Which Pass It",
+	// Mathematics of Computation, 64(209) (January 1995), pp. 335-361.
+	"1195068768795265792518361315725116351898245581", // strong pseudoprime to prime bases 2 through 29
+	// strong pseudoprime to all prime bases up to 200
+	`
+     80383745745363949125707961434194210813883768828755814583748891752229
+      74273765333652186502336163960045457915042023603208766569966760987284
+       0439654082329287387918508691668573282677617710293896977394701670823
+        0428687109997439976544144845341155872450633409279022275296229414984
+         2306881685404326457534018329786111298960644845216191652872597534901`,
+
+	// Extra-strong Lucas pseudoprimes. https://oeis.org/A217719
+	"989",
+	"3239",
+	"5777",
+	"10877",
+	"27971",
+	"29681",
+	"30739",
+	"31631",
+	"39059",
+	"72389",
+	"73919",
+	"75077",
+	"100127",
+	"113573",
+	"125249",
+	"137549",
+	"137801",
+	"153931",
+	"155819",
+	"161027",
+	"162133",
+	"189419",
+	"218321",
+	"231703",
+	"249331",
+	"370229",
+	"429479",
+	"430127",
+	"459191",
+	"473891",
+	"480689",
+	"600059",
+	"621781",
+	"632249",
+	"635627",
+
+	"3673744903",
+	"3281593591",
+	"2385076987",
+	"2738053141",
+	"2009621503",
+	"1502682721",
+	"255866131",
+	"117987841",
+	"587861",
+
+	"6368689",
+	"8725753",
+	"80579735209",
+	"105919633",
+}
+
+func cutSpace(r rune) rune {
+	if unicode.IsSpace(r) {
+		return -1
+	}
+	return r
 }
 
 func TestProbablyPrime(t *testing.T) {
@@ -57,18 +129,16 @@ func TestProbablyPrime(t *testing.T) {
 	}
 	for i, s := range primes {
 		p, _ := new(Int).SetString(s, 10)
-		if !p.ProbablyPrime(nreps) {
+		if !p.ProbablyPrime(nreps) || nreps != 1 && !p.ProbablyPrime(1) || !p.ProbablyPrime(0) {
 			t.Errorf("#%d prime found to be non-prime (%s)", i, s)
 		}
 	}
 
 	for i, s := range composites {
+		s = strings.Map(cutSpace, s)
 		c, _ := new(Int).SetString(s, 10)
-		if c.ProbablyPrime(nreps) {
+		if c.ProbablyPrime(nreps) || nreps != 1 && c.ProbablyPrime(1) || c.ProbablyPrime(0) {
 			t.Errorf("#%d composite found to be prime (%s)", i, s)
-		}
-		if testing.Short() {
-			break
 		}
 	}
 
@@ -77,7 +147,7 @@ func TestProbablyPrime(t *testing.T) {
 	for _, n := range []int{-1, 0, 1} {
 		func() {
 			defer func() {
-				if n <= 0 && recover() == nil {
+				if n < 0 && recover() == nil {
 					t.Fatalf("expected panic from ProbablyPrime(%d)", n)
 				}
 			}()
@@ -90,11 +160,63 @@ func TestProbablyPrime(t *testing.T) {
 
 func BenchmarkProbablyPrime(b *testing.B) {
 	p, _ := new(Int).SetString("203956878356401977405765866929034577280193993314348263094772646453283062722701277632936616063144088173312372882677123879538709400158306567338328279154499698366071906766440037074217117805690872792848149112022286332144876183376326512083574821647933992961249917319836219304274280243803104015000563790123", 10)
-	for _, rep := range []int{1, 5, 10, 20} {
-		b.Run(fmt.Sprintf("Rep=%d", rep), func(b *testing.B) {
+	for _, n := range []int{0, 1, 5, 10, 20} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				p.ProbablyPrime(rep)
+				p.ProbablyPrime(n)
 			}
 		})
+	}
+
+	b.Run("Lucas", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			p.abs.probablyPrimeLucas()
+		}
+	})
+	b.Run("MillerRabinBase2", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			p.abs.probablyPrimeMillerRabin(1, true)
+		}
+	})
+}
+
+func TestMillerRabinPseudoprimes(t *testing.T) {
+	testPseudoprimes(t, "probablyPrimeMillerRabin",
+		func(n nat) bool { return n.probablyPrimeMillerRabin(1, true) && !n.probablyPrimeLucas() },
+		// https://oeis.org/A001262
+		[]int{2047, 3277, 4033, 4681, 8321, 15841, 29341, 42799, 49141, 52633, 65281, 74665, 80581, 85489, 88357, 90751})
+}
+
+func TestLucasPseudoprimes(t *testing.T) {
+	testPseudoprimes(t, "probablyPrimeLucas",
+		func(n nat) bool { return n.probablyPrimeLucas() && !n.probablyPrimeMillerRabin(1, true) },
+		// https://oeis.org/A217719
+		[]int{989, 3239, 5777, 10877, 27971, 29681, 30739, 31631, 39059, 72389, 73919, 75077})
+}
+
+func testPseudoprimes(t *testing.T, name string, cond func(nat) bool, want []int) {
+	n := nat{1}
+	for i := 3; i < 100000; i += 2 {
+		if testing.Short() {
+			if len(want) == 0 {
+				break
+			}
+			if i < want[0]-2 {
+				i = want[0] - 2
+			}
+		}
+		n[0] = Word(i)
+		pseudo := cond(n)
+		if pseudo && (len(want) == 0 || i != want[0]) {
+			t.Errorf("%s(%v, base=2) = true, want false", name, i)
+		} else if !pseudo && len(want) >= 1 && i == want[0] {
+			t.Errorf("%s(%v, base=2) = false, want true", name, i)
+		}
+		if len(want) > 0 && i == want[0] {
+			want = want[1:]
+		}
+	}
+	if len(want) > 0 {
+		t.Fatalf("forgot to test %v", want)
 	}
 }

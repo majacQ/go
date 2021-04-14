@@ -8,10 +8,10 @@
 package net
 
 import (
+	"internal/bytealg"
 	"io"
 	"os"
 	"time"
-	_ "unsafe" // For go:linkname
 )
 
 type file struct {
@@ -69,7 +69,7 @@ func open(name string) (*file, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &file{fd, make([]byte, 0, os.Getpagesize()), false}, nil
+	return &file{fd, make([]byte, 0, 64*1024), false}, nil
 }
 
 func stat(name string) (mtime time.Time, size int64, err error) {
@@ -80,17 +80,11 @@ func stat(name string) (mtime time.Time, size int64, err error) {
 	return st.ModTime(), st.Size(), nil
 }
 
-// byteIndex is strings.IndexByte. It returns the index of the
-// first instance of c in s, or -1 if c is not present in s.
-// strings.IndexByte is implemented in  runtime/asm_$GOARCH.s
-//go:linkname byteIndex strings.IndexByte
-func byteIndex(s string, c byte) int
-
 // Count occurrences in s of any bytes in t.
 func countAnyByte(s string, t string) int {
 	n := 0
 	for i := 0; i < len(s); i++ {
-		if byteIndex(t, s[i]) >= 0 {
+		if bytealg.IndexByteString(t, s[i]) >= 0 {
 			n++
 		}
 	}
@@ -103,7 +97,7 @@ func splitAtBytes(s string, t string) []string {
 	n := 0
 	last := 0
 	for i := 0; i < len(s); i++ {
-		if byteIndex(t, s[i]) >= 0 {
+		if bytealg.IndexByteString(t, s[i]) >= 0 {
 			if last < i {
 				a[n] = s[last:i]
 				n++
@@ -276,7 +270,7 @@ func isSpace(b byte) bool {
 // removeComment returns line, removing any '#' byte and any following
 // bytes.
 func removeComment(line []byte) []byte {
-	if i := bytesIndexByte(line, '#'); i != -1 {
+	if i := bytealg.IndexByte(line, '#'); i != -1 {
 		return line[:i]
 	}
 	return line
@@ -287,7 +281,7 @@ func removeComment(line []byte) []byte {
 // It returns the first non-nil error returned by fn.
 func foreachLine(x []byte, fn func(line []byte) error) error {
 	for len(x) > 0 {
-		nl := bytesIndexByte(x, '\n')
+		nl := bytealg.IndexByte(x, '\n')
 		if nl == -1 {
 			return fn(x)
 		}
@@ -305,7 +299,7 @@ func foreachLine(x []byte, fn func(line []byte) error) error {
 func foreachField(x []byte, fn func(field []byte) error) error {
 	x = trimSpace(x)
 	for len(x) > 0 {
-		sp := bytesIndexByte(x, ' ')
+		sp := bytealg.IndexByte(x, ' ')
 		if sp == -1 {
 			return fn(x)
 		}
@@ -319,12 +313,6 @@ func foreachField(x []byte, fn func(field []byte) error) error {
 	return nil
 }
 
-// bytesIndexByte is bytes.IndexByte. It returns the index of the
-// first instance of c in s, or -1 if c is not present in s.
-// bytes.IndexByte is implemented in  runtime/asm_$GOARCH.s
-//go:linkname bytesIndexByte bytes.IndexByte
-func bytesIndexByte(s []byte, c byte) int
-
 // stringsHasSuffix is strings.HasSuffix. It reports whether s ends in
 // suffix.
 func stringsHasSuffix(s, suffix string) bool {
@@ -334,20 +322,26 @@ func stringsHasSuffix(s, suffix string) bool {
 // stringsHasSuffixFold reports whether s ends in suffix,
 // ASCII-case-insensitively.
 func stringsHasSuffixFold(s, suffix string) bool {
-	if len(suffix) > len(s) {
-		return false
-	}
-	for i := 0; i < len(suffix); i++ {
-		if lowerASCII(suffix[i]) != lowerASCII(s[len(s)-len(suffix)+i]) {
-			return false
-		}
-	}
-	return true
+	return len(s) >= len(suffix) && stringsEqualFold(s[len(s)-len(suffix):], suffix)
 }
 
 // stringsHasPrefix is strings.HasPrefix. It reports whether s begins with prefix.
 func stringsHasPrefix(s, prefix string) bool {
 	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+}
+
+// stringsEqualFold is strings.EqualFold, ASCII only. It reports whether s and t
+// are equal, ASCII-case-insensitively.
+func stringsEqualFold(s, t string) bool {
+	if len(s) != len(t) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if lowerASCII(s[i]) != lowerASCII(t[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func readFull(r io.Reader) (all []byte, err error) {

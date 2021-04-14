@@ -231,6 +231,9 @@ func TestHello(t *testing.T) {
 
 // Test that pack works with very long lines in PKGDEF.
 func TestLargeDefs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in -short mode")
+	}
 	testenv.MustHaveGoBuild(t)
 
 	dir := tmpDir(t)
@@ -293,6 +296,37 @@ func TestLargeDefs(t *testing.T) {
 	if out != "ok\n" {
 		t.Fatalf("incorrect output: %q, want %q", out, "ok\n")
 	}
+}
+
+// Test that "\n!\n" inside export data doesn't result in a truncated
+// package definition when creating a .a archive from a .o Go object.
+func TestIssue21703(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+
+	dir := tmpDir(t)
+	defer os.RemoveAll(dir)
+
+	const aSrc = `package a; const X = "\n!\n"`
+	err := ioutil.WriteFile(filepath.Join(dir, "a.go"), []byte(aSrc), 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const bSrc = `package b; import _ "a"`
+	err = ioutil.WriteFile(filepath.Join(dir, "b.go"), []byte(bSrc), 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) string {
+		return doRun(t, dir, args...)
+	}
+
+	goBin := testenv.GoToolPath(t)
+	run(goBin, "build", "cmd/pack") // writes pack binary to dir
+	run(goBin, "tool", "compile", "a.go")
+	run("./pack", "c", "a.a", "a.o")
+	run(goBin, "tool", "compile", "-I", ".", "b.go")
 }
 
 // doRun runs a program in a directory and returns the output.

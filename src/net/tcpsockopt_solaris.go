@@ -5,20 +5,15 @@
 package net
 
 import (
-	"os"
+	"runtime"
 	"syscall"
 	"time"
 )
 
 func setKeepAlivePeriod(fd *netFD, d time.Duration) error {
-	if err := fd.incref(); err != nil {
-		return err
-	}
-	defer fd.decref()
 	// The kernel expects milliseconds so round to next highest
 	// millisecond.
-	d += (time.Millisecond - time.Nanosecond)
-	msecs := int(d / time.Millisecond)
+	msecs := int(roundDurationUp(d, time.Millisecond))
 
 	// Normally we'd do
 	//	syscall.SetsockoptInt(fd.sysfd, syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, secs)
@@ -31,5 +26,7 @@ func setKeepAlivePeriod(fd *netFD, d time.Duration) error {
 	// allocate a constant with a different meaning for the value of
 	// TCP_KEEPINTVL on illumos.
 
-	return os.NewSyscallError("setsockopt", syscall.SetsockoptInt(fd.sysfd, syscall.IPPROTO_TCP, syscall.TCP_KEEPALIVE_THRESHOLD, msecs))
+	err := fd.pfd.SetsockoptInt(syscall.IPPROTO_TCP, syscall.TCP_KEEPALIVE_THRESHOLD, msecs)
+	runtime.KeepAlive(fd)
+	return wrapSyscallError("setsockopt", err)
 }

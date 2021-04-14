@@ -18,11 +18,16 @@ import (
 	"time"
 )
 
-// One of the copies, say from b to r2, could be avoided by using a more
-// elaborate trick where the other copy is made during Request/Response.Write.
-// This would complicate things too much, given that these functions are for
-// debugging only.
+// drainBody reads all of b to memory and then returns two equivalent
+// ReadClosers yielding the same bytes.
+//
+// It returns an error if the initial slurp of all bytes fails. It does not attempt
+// to make the returned ReadClosers have identical error-matching behavior.
 func drainBody(b io.ReadCloser) (r1, r2 io.ReadCloser, err error) {
+	if b == nil || b == http.NoBody {
+		// No copying needed. Preserve the magic sentinel meaning of NoBody.
+		return http.NoBody, http.NoBody, nil
+	}
 	var buf bytes.Buffer
 	if _, err = buf.ReadFrom(b); err != nil {
 		return nil, b, err
@@ -55,16 +60,28 @@ func (b neverEnding) Read(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// outGoingLength is a copy of the unexported
+// (*http.Request).outgoingLength method.
+func outgoingLength(req *http.Request) int64 {
+	if req.Body == nil || req.Body == http.NoBody {
+		return 0
+	}
+	if req.ContentLength != 0 {
+		return req.ContentLength
+	}
+	return -1
+}
+
 // DumpRequestOut is like DumpRequest but for outgoing client requests. It
 // includes any headers that the standard http.Transport adds, such as
 // User-Agent.
 func DumpRequestOut(req *http.Request, body bool) ([]byte, error) {
 	save := req.Body
 	dummyBody := false
-	if !body || req.Body == nil {
-		req.Body = nil
-		if req.ContentLength != 0 {
-			req.Body = ioutil.NopCloser(io.LimitReader(neverEnding('x'), req.ContentLength))
+	if !body {
+		contentLength := outgoingLength(req)
+		if contentLength != 0 {
+			req.Body = ioutil.NopCloser(io.LimitReader(neverEnding('x'), contentLength))
 			dummyBody = true
 		}
 	} else {
@@ -106,6 +123,10 @@ func DumpRequestOut(req *http.Request, body bool) ([]byte, error) {
 	}
 	defer t.CloseIdleConnections()
 
+	// We need this channel to ensure that the reader
+	// goroutine exits if t.RoundTrip returns an error.
+	// See golang.org/issue/32571.
+	quitReadCh := make(chan struct{})
 	// Wait for the request before replying with a dummy response:
 	go func() {
 		req, err := http.ReadRequest(bufio.NewReader(pr))
@@ -115,13 +136,18 @@ func DumpRequestOut(req *http.Request, body bool) ([]byte, error) {
 			io.Copy(ioutil.Discard, req.Body)
 			req.Body.Close()
 		}
-		dr.c <- strings.NewReader("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+		select {
+		case dr.c <- strings.NewReader("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"):
+		case <-quitReadCh:
+		}
 	}()
 
 	_, err := t.RoundTrip(reqSend)
 
 	req.Body = save
 	if err != nil {
+		pw.Close()
+		quitReadCh <- struct{}{}
 		return nil, err
 	}
 	dump := buf.Bytes()

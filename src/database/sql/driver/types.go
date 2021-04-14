@@ -38,6 +38,7 @@ type ValueConverter interface {
 // themselves to a driver Value.
 type Valuer interface {
 	// Value returns a driver Value.
+	// Value must not panic.
 	Value() (Value, error)
 }
 
@@ -179,6 +180,8 @@ func IsValue(v interface{}) bool {
 	switch v.(type) {
 	case []byte, bool, float64, int64, string, time.Time:
 		return true
+	case decimalDecompose:
+		return true
 	}
 	return false
 }
@@ -198,9 +201,9 @@ func IsScanValue(v interface{}) bool {
 // Value method is used to return a Value. As a fallback, the provided
 // argument's underlying type is used to convert it to a Value:
 // underlying integer types are converted to int64, floats to float64,
-// and strings to []byte. If the argument is a nil pointer,
-// ConvertValue returns a nil Value. If the argument is a non-nil
-// pointer, it is dereferenced and ConvertValue is called
+// bool, string, and []byte to themselves. If the argument is a nil
+// pointer, ConvertValue returns a nil Value. If the argument is a
+// non-nil pointer, it is dereferenced and ConvertValue is called
 // recursively. Other types are an error.
 var DefaultParameterConverter defaultConverter
 
@@ -235,7 +238,8 @@ func (defaultConverter) ConvertValue(v interface{}) (Value, error) {
 		return v, nil
 	}
 
-	if vr, ok := v.(Valuer); ok {
+	switch vr := v.(type) {
+	case Valuer:
 		sv, err := callValuerValue(vr)
 		if err != nil {
 			return nil, err
@@ -244,6 +248,10 @@ func (defaultConverter) ConvertValue(v interface{}) (Value, error) {
 			return nil, fmt.Errorf("non-Value type %T returned from Value", sv)
 		}
 		return sv, nil
+
+	// For now, continue to prefer the Valuer interface over the decimal decompose interface.
+	case decimalDecompose:
+		return vr, nil
 	}
 
 	rv := reflect.ValueOf(v)
@@ -267,6 +275,23 @@ func (defaultConverter) ConvertValue(v interface{}) (Value, error) {
 		return int64(u64), nil
 	case reflect.Float32, reflect.Float64:
 		return rv.Float(), nil
+	case reflect.Bool:
+		return rv.Bool(), nil
+	case reflect.Slice:
+		ek := rv.Type().Elem().Kind()
+		if ek == reflect.Uint8 {
+			return rv.Bytes(), nil
+		}
+		return nil, fmt.Errorf("unsupported type %T, a slice of %s", v, ek)
+	case reflect.String:
+		return rv.String(), nil
 	}
 	return nil, fmt.Errorf("unsupported type %T, a %s", v, rv.Kind())
+}
+
+type decimalDecompose interface {
+	// Decompose returns the internal decimal state into parts.
+	// If the provided buf has sufficient capacity, buf may be returned as the coefficient with
+	// the value set and length set as appropriate.
+	Decompose(buf []byte) (form byte, negative bool, coefficient []byte, exponent int32)
 }

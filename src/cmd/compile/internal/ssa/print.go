@@ -6,12 +6,20 @@ package ssa
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 )
 
 func printFunc(f *Func) {
 	f.Logf("%s", f)
+}
+
+func hashFunc(f *Func) []byte {
+	h := sha256.New()
+	p := stringFuncPrinter{w: h}
+	fprintFunc(p, f)
+	return h.Sum(nil)
 }
 
 func (f *Func) String() string {
@@ -62,7 +70,7 @@ func (p stringFuncPrinter) endBlock(b *Block) {
 
 func (p stringFuncPrinter) value(v *Value, live bool) {
 	fmt.Fprint(p.w, "    ")
-	//fmt.Fprint(p.w, v.Block.Func.Config.fe.Line(v.Line))
+	//fmt.Fprint(p.w, v.Block.Func.fe.Pos(v.Pos))
 	//fmt.Fprint(p.w, ": ")
 	fmt.Fprint(p.w, v.LongString())
 	if !live {
@@ -78,11 +86,12 @@ func (p stringFuncPrinter) startDepCycle() {
 func (p stringFuncPrinter) endDepCycle() {}
 
 func (p stringFuncPrinter) named(n LocalSlot, vals []*Value) {
-	fmt.Fprintf(p.w, "name %s: %v\n", n.Name(), vals)
+	fmt.Fprintf(p.w, "name %s: %v\n", n, vals)
 }
 
 func fprintFunc(p funcPrinter, f *Func) {
 	reachable, live := findlive(f)
+	defer f.retDeadcodeLive(live)
 	p.header(f)
 	printed := make([]bool, f.NumValues())
 	for _, b := range f.Blocks {

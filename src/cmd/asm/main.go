@@ -18,13 +18,14 @@ import (
 
 	"cmd/internal/bio"
 	"cmd/internal/obj"
+	"cmd/internal/objabi"
 )
 
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("asm: ")
 
-	GOARCH := obj.GOARCH
+	GOARCH := objabi.GOARCH
 
 	architecture := arch.Set(GOARCH)
 	if architecture == nil {
@@ -37,42 +38,67 @@ func main() {
 	if *flags.PrintOut {
 		ctxt.Debugasm = 1
 	}
-	ctxt.LineHist.TrimPathPrefix = *flags.TrimPath
 	ctxt.Flag_dynlink = *flags.Dynlink
 	ctxt.Flag_shared = *flags.Shared || *flags.Dynlink
+	ctxt.Flag_go115newobj = *flags.Go115Newobj
+	ctxt.IsAsm = true
+	switch *flags.Spectre {
+	default:
+		log.Printf("unknown setting -spectre=%s", *flags.Spectre)
+		os.Exit(2)
+	case "":
+		// nothing
+	case "index":
+		// known to compiler; ignore here so people can use
+		// the same list with -gcflags=-spectre=LIST and -asmflags=-spectrre=LIST
+	case "all", "ret":
+		ctxt.Retpoline = true
+	}
+
 	ctxt.Bso = bufio.NewWriter(os.Stdout)
 	defer ctxt.Bso.Flush()
 
+	architecture.Init(ctxt)
+
 	// Create object file, write header.
-	out, err := os.Create(*flags.OutputFile)
+	buf, err := bio.Create(*flags.OutputFile)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bio.MustClose(out)
-	buf := bufio.NewWriter(bio.MustWriter(out))
+	defer buf.Close()
 
-	fmt.Fprintf(buf, "go object %s %s %s\n", obj.GOOS, obj.GOARCH, obj.Version)
-	fmt.Fprintf(buf, "!\n")
+	if !*flags.SymABIs {
+		fmt.Fprintf(buf, "go object %s %s %s\n", objabi.GOOS, objabi.GOARCH, objabi.Version)
+		fmt.Fprintf(buf, "!\n")
+	}
 
 	var ok, diag bool
 	var failedFile string
 	for _, f := range flag.Args() {
-		lexer := lex.NewLexer(f, ctxt)
+		lexer := lex.NewLexer(f)
 		parser := asm.NewParser(ctxt, architecture, lexer)
 		ctxt.DiagFunc = func(format string, args ...interface{}) {
 			diag = true
 			log.Printf(format, args...)
 		}
-		pList := obj.Linknewplist(ctxt)
-		pList.Firstpc, ok = parser.Parse()
+		if *flags.SymABIs {
+			ok = parser.ParseSymABIs(buf)
+		} else {
+			pList := new(obj.Plist)
+			pList.Firstpc, ok = parser.Parse()
+			// reports errors to parser.Errorf
+			if ok {
+				obj.Flushplist(ctxt, pList, nil, *flags.Importpath)
+			}
+		}
 		if !ok {
 			failedFile = f
 			break
 		}
 	}
-	if ok {
-		// reports errors to parser.Errorf
-		obj.Writeobjdirect(ctxt, buf)
+	if ok && !*flags.SymABIs {
+		ctxt.NumberSyms(true)
+		obj.WriteObjFile(ctxt, buf, "")
 	}
 	if !ok || diag {
 		if failedFile != "" {
@@ -80,9 +106,8 @@ func main() {
 		} else {
 			log.Print("assembly failed")
 		}
-		out.Close()
+		buf.Close()
 		os.Remove(*flags.OutputFile)
 		os.Exit(1)
 	}
-	buf.Flush()
 }
