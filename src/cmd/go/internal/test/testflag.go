@@ -56,6 +56,7 @@ func init() {
 	cf.String("cpu", "", "")
 	cf.StringVar(&testCPUProfile, "cpuprofile", "", "")
 	cf.Bool("failfast", false, "")
+	cf.StringVar(&testFuzz, "fuzz", "", "")
 	cf.StringVar(&testList, "list", "", "")
 	cf.StringVar(&testMemProfile, "memprofile", "", "")
 	cf.String("memprofilerate", "", "")
@@ -66,6 +67,7 @@ func init() {
 	cf.String("run", "", "")
 	cf.Bool("short", false, "")
 	cf.DurationVar(&testTimeout, "timeout", 10*time.Minute, "")
+	cf.Duration("fuzztime", 0, "")
 	cf.StringVar(&testTrace, "trace", "", "")
 	cf.BoolVar(&testV, "v", false, "")
 
@@ -325,7 +327,7 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 		if !testC {
 			buildFlag = "-i"
 		}
-		fmt.Fprintf(os.Stderr, "flag %s is not a 'go test' flag (unknown flags cannot be used with %s)\n", firstUnknownFlag, buildFlag)
+		fmt.Fprintf(os.Stderr, "go test: unknown flag %s cannot be used with %s\n", firstUnknownFlag, buildFlag)
 		exitWithUsage()
 	}
 

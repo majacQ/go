@@ -25,6 +25,7 @@ import (
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
 	"fmt"
+	"log"
 )
 
 func buildop(ctxt *obj.Link) {}
@@ -48,7 +49,7 @@ func jalrToSym(ctxt *obj.Link, p *obj.Prog, newprog obj.ProgAlloc, lr int16) *ob
 
 	p.As = AAUIPC
 	p.Mark |= NEED_PCREL_ITYPE_RELOC
-	p.RestArgs = []obj.Addr{obj.Addr{Type: obj.TYPE_CONST, Offset: to.Offset, Sym: to.Sym}}
+	p.SetFrom3(obj.Addr{Type: obj.TYPE_CONST, Offset: to.Offset, Sym: to.Sym})
 	p.From = obj.Addr{Type: obj.TYPE_CONST, Offset: 0}
 	p.Reg = 0
 	p.To = obj.Addr{Type: obj.TYPE_REG, Reg: REG_TMP}
@@ -119,7 +120,7 @@ func progedit(ctxt *obj.Link, p *obj.Prog, newprog obj.ProgAlloc) {
 			switch p.To.Name {
 			case obj.NAME_NONE:
 				p.As = AJALR
-			case obj.NAME_EXTERN:
+			case obj.NAME_EXTERN, obj.NAME_STATIC:
 				// Handled in preprocess.
 			default:
 				ctxt.Diag("unsupported name %d for %v", p.To.Name, p)
@@ -234,7 +235,7 @@ func rewriteMOV(ctxt *obj.Link, newprog obj.ProgAlloc, p *obj.Prog) {
 
 			p.As = AAUIPC
 			p.Mark |= NEED_PCREL_ITYPE_RELOC
-			p.RestArgs = []obj.Addr{obj.Addr{Type: obj.TYPE_CONST, Offset: p.From.Offset, Sym: p.From.Sym}}
+			p.SetFrom3(obj.Addr{Type: obj.TYPE_CONST, Offset: p.From.Offset, Sym: p.From.Sym})
 			p.From = obj.Addr{Type: obj.TYPE_CONST, Offset: 0}
 			p.Reg = 0
 			p.To = obj.Addr{Type: obj.TYPE_REG, Reg: to.Reg}
@@ -267,7 +268,7 @@ func rewriteMOV(ctxt *obj.Link, newprog obj.ProgAlloc, p *obj.Prog) {
 				p.As = movToStore(p.As)
 				p.To.Reg = addrToReg(p.To)
 
-			case obj.NAME_EXTERN:
+			case obj.NAME_EXTERN, obj.NAME_STATIC:
 				// AUIPC $off_hi, TMP
 				// S $off_lo, TMP, R
 				as := p.As
@@ -275,7 +276,7 @@ func rewriteMOV(ctxt *obj.Link, newprog obj.ProgAlloc, p *obj.Prog) {
 
 				p.As = AAUIPC
 				p.Mark |= NEED_PCREL_STYPE_RELOC
-				p.RestArgs = []obj.Addr{obj.Addr{Type: obj.TYPE_CONST, Offset: p.To.Offset, Sym: p.To.Sym}}
+				p.SetFrom3(obj.Addr{Type: obj.TYPE_CONST, Offset: p.To.Offset, Sym: p.To.Sym})
 				p.From = obj.Addr{Type: obj.TYPE_CONST, Offset: 0}
 				p.Reg = 0
 				p.To = obj.Addr{Type: obj.TYPE_REG, Reg: REG_TMP}
@@ -340,7 +341,7 @@ func rewriteMOV(ctxt *obj.Link, newprog obj.ProgAlloc, p *obj.Prog) {
 
 			p.As = AAUIPC
 			p.Mark |= NEED_PCREL_ITYPE_RELOC
-			p.RestArgs = []obj.Addr{obj.Addr{Type: obj.TYPE_CONST, Offset: p.From.Offset, Sym: p.From.Sym}}
+			p.SetFrom3(obj.Addr{Type: obj.TYPE_CONST, Offset: p.From.Offset, Sym: p.From.Sym})
 			p.From = obj.Addr{Type: obj.TYPE_CONST, Offset: 0}
 			p.Reg = 0
 			p.To = to
@@ -666,7 +667,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			switch p.To.Type {
 			case obj.TYPE_MEM:
 				switch p.To.Name {
-				case obj.NAME_EXTERN:
+				case obj.NAME_EXTERN, obj.NAME_STATIC:
 					// JMP to symbol.
 					jalrToSym(ctxt, p, newprog, REG_ZERO)
 				}
@@ -714,6 +715,21 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			// Refine Spadjs account for adjustment via ADDI instruction.
 			if p.To.Type == obj.TYPE_REG && p.To.Reg == REG_SP && p.From.Type == obj.TYPE_CONST {
 				p.Spadj = int32(-p.From.Offset)
+			}
+		}
+
+		if p.To.Type == obj.TYPE_REG && p.To.Reg == REGSP && p.Spadj == 0 {
+			f := cursym.Func()
+			if f.FuncFlag&objabi.FuncFlag_SPWRITE == 0 {
+				f.FuncFlag |= objabi.FuncFlag_SPWRITE
+				if ctxt.Debugvlog || !ctxt.IsAsm {
+					ctxt.Logf("auto-SPWRITE: %s %v\n", cursym.Name, p)
+					if !ctxt.IsAsm {
+						ctxt.Diag("invalid auto-SPWRITE in non-assembly")
+						ctxt.DiagFlush()
+						log.Fatalf("bad SPWRITE")
+					}
+				}
 			}
 		}
 	}
@@ -1777,15 +1793,15 @@ func instructionsForProg(p *obj.Prog) []*instruction {
 		case ABGEZ:
 			ins.as, ins.rs1, ins.rs2 = ABGE, REG_ZERO, uint32(p.From.Reg)
 		case ABGT:
-			ins.as, ins.rs1, ins.rs2 = ABLT, uint32(p.Reg), uint32(p.From.Reg)
+			ins.as, ins.rs1, ins.rs2 = ABLT, uint32(p.From.Reg), uint32(p.Reg)
 		case ABGTU:
-			ins.as, ins.rs1, ins.rs2 = ABLTU, uint32(p.Reg), uint32(p.From.Reg)
+			ins.as, ins.rs1, ins.rs2 = ABLTU, uint32(p.From.Reg), uint32(p.Reg)
 		case ABGTZ:
 			ins.as, ins.rs1, ins.rs2 = ABLT, uint32(p.From.Reg), REG_ZERO
 		case ABLE:
-			ins.as, ins.rs1, ins.rs2 = ABGE, uint32(p.Reg), uint32(p.From.Reg)
+			ins.as, ins.rs1, ins.rs2 = ABGE, uint32(p.From.Reg), uint32(p.Reg)
 		case ABLEU:
-			ins.as, ins.rs1, ins.rs2 = ABGEU, uint32(p.Reg), uint32(p.From.Reg)
+			ins.as, ins.rs1, ins.rs2 = ABGEU, uint32(p.From.Reg), uint32(p.Reg)
 		case ABLEZ:
 			ins.as, ins.rs1, ins.rs2 = ABGE, uint32(p.From.Reg), REG_ZERO
 		case ABLTZ:

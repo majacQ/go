@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,6 +75,8 @@ The -modcache flag causes clean to remove the entire module
 download cache, including unpacked source code of versioned
 dependencies.
 
+The -fuzzcache flag causes clean to remove values used for fuzz testing.
+
 For more about build flags, see 'go help build'.
 
 For more about specifying packages, see 'go help packages'.
@@ -86,6 +87,7 @@ var (
 	cleanI         bool // clean -i flag
 	cleanR         bool // clean -r flag
 	cleanCache     bool // clean -cache flag
+	cleanFuzzcache bool // clean -fuzzcache flag
 	cleanModcache  bool // clean -modcache flag
 	cleanTestcache bool // clean -testcache flag
 )
@@ -97,6 +99,7 @@ func init() {
 	CmdClean.Flag.BoolVar(&cleanI, "i", false, "")
 	CmdClean.Flag.BoolVar(&cleanR, "r", false, "")
 	CmdClean.Flag.BoolVar(&cleanCache, "cache", false, "")
+	CmdClean.Flag.BoolVar(&cleanFuzzcache, "fuzzcache", false, "")
 	CmdClean.Flag.BoolVar(&cleanModcache, "modcache", false, "")
 	CmdClean.Flag.BoolVar(&cleanTestcache, "testcache", false, "")
 
@@ -207,6 +210,18 @@ func runClean(ctx context.Context, cmd *base.Command, args []string) {
 			}
 		}
 	}
+
+	if cleanFuzzcache {
+		fuzzDir := cache.Default().FuzzDir()
+		if cfg.BuildN || cfg.BuildX {
+			b.Showcmd("", "rm -rf %s", fuzzDir)
+		}
+		if !cfg.BuildN {
+			if err := os.RemoveAll(fuzzDir); err != nil {
+				base.Errorf("go clean -fuzzcache: %v", err)
+			}
+		}
+	}
 }
 
 var cleaned = map[*load.Package]bool{}
@@ -244,7 +259,7 @@ func clean(p *load.Package) {
 		base.Errorf("%v", p.Error)
 		return
 	}
-	dirs, err := ioutil.ReadDir(p.Dir)
+	dirs, err := os.ReadDir(p.Dir)
 	if err != nil {
 		base.Errorf("go clean %s: %v", p.Dir, err)
 		return

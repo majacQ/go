@@ -1549,7 +1549,7 @@ var cgoEnabled = map[string]bool{
 	"linux/mipsle":    true,
 	"linux/mips64":    true,
 	"linux/mips64le":  true,
-	"linux/riscv64":   false, // Issue 36641
+	"linux/riscv64":   true,
 	"linux/s390x":     true,
 	"linux/sparc64":   true,
 	"android/386":     true,
@@ -1575,13 +1575,13 @@ var cgoEnabled = map[string]bool{
 	"windows/386":     true,
 	"windows/amd64":   true,
 	"windows/arm":     false,
+	"windows/arm64":   false,
 }
 
 // List of platforms which are supported but not complete yet. These get
 // filtered out of cgoEnabled for 'dist list'. See golang.org/issue/28944
 var incomplete = map[string]bool{
-	"linux/sparc64":  true,
-	"openbsd/mips64": true,
+	"linux/sparc64": true,
 }
 
 func needCC() bool {
@@ -1765,6 +1765,8 @@ func IsRuntimePackagePath(pkgpath string) bool {
 	case "reflect":
 		rval = true
 	case "syscall":
+		rval = true
+	case "crypto/x509/internal/macos": // libc function wrappers need to be ABIInternal
 		rval = true
 	default:
 		rval = strings.HasPrefix(pkgpath, "runtime/internal")

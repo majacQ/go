@@ -727,14 +727,6 @@ func (t *tester) registerTests() {
 		}
 	}
 
-	// Doc tests only run on builders.
-	// They find problems approximately never.
-	if goos != "js" && goos != "android" && !t.iOS() && os.Getenv("GO_BUILDER_NAME") != "" {
-		t.registerTest("doc_progs", "../doc/progs", "go", "run", "run.go")
-		t.registerTest("wiki", "../doc/articles/wiki", t.goTest(), ".")
-		t.registerTest("codewalk", "../doc/codewalk", t.goTest(), "codewalk_test.go")
-	}
-
 	if goos != "android" && !t.iOS() {
 		// There are no tests in this directory, only benchmarks.
 		// Check that the test binary builds but don't bother running it.
@@ -953,7 +945,7 @@ func (t *tester) internalLink() bool {
 	// Internally linking cgo is incomplete on some architectures.
 	// https://golang.org/issue/10373
 	// https://golang.org/issue/14449
-	if goarch == "mips64" || goarch == "mips64le" || goarch == "mips" || goarch == "mipsle" {
+	if goarch == "mips64" || goarch == "mips64le" || goarch == "mips" || goarch == "mipsle" || goarch == "riscv64" {
 		return false
 	}
 	if goos == "aix" {
@@ -984,7 +976,7 @@ func (t *tester) supportedBuildmode(mode string) bool {
 		switch pair {
 		case "aix-ppc64",
 			"darwin-amd64", "darwin-arm64", "ios-arm64",
-			"linux-amd64", "linux-386", "linux-ppc64le", "linux-riscv64", "linux-s390x",
+			"linux-amd64", "linux-386", "linux-ppc64le", "linux-s390x",
 			"freebsd-amd64",
 			"windows-amd64", "windows-386":
 			return true
@@ -992,7 +984,7 @@ func (t *tester) supportedBuildmode(mode string) bool {
 		return false
 	case "c-shared":
 		switch pair {
-		case "linux-386", "linux-amd64", "linux-arm", "linux-arm64", "linux-ppc64le", "linux-riscv64", "linux-s390x",
+		case "linux-386", "linux-amd64", "linux-arm", "linux-arm64", "linux-ppc64le", "linux-s390x",
 			"darwin-amd64", "darwin-arm64",
 			"freebsd-amd64",
 			"android-arm", "android-arm64", "android-386",
@@ -1002,7 +994,7 @@ func (t *tester) supportedBuildmode(mode string) bool {
 		return false
 	case "shared":
 		switch pair {
-		case "linux-386", "linux-amd64", "linux-arm", "linux-arm64", "linux-ppc64le", "linux-riscv64", "linux-s390x":
+		case "linux-386", "linux-amd64", "linux-arm", "linux-arm64", "linux-ppc64le", "linux-s390x":
 			return true
 		}
 		return false
@@ -1095,7 +1087,6 @@ func (t *tester) cgoTest(dt *distTest) error {
 	pair := gohostos + "-" + goarch
 	switch pair {
 	case "darwin-amd64", "darwin-arm64",
-		"openbsd-386", "openbsd-amd64",
 		"windows-386", "windows-amd64":
 		// test linkmode=external, but __thread not supported, so skip testtls.
 		if !t.extLink() {
@@ -1117,8 +1108,9 @@ func (t *tester) cgoTest(dt *distTest) error {
 		"android-arm", "android-arm64",
 		"dragonfly-amd64",
 		"freebsd-386", "freebsd-amd64", "freebsd-arm",
-		"linux-386", "linux-amd64", "linux-arm", "linux-ppc64le", "linux-s390x",
-		"netbsd-386", "netbsd-amd64", "linux-arm64":
+		"linux-386", "linux-amd64", "linux-arm", "linux-arm64", "linux-ppc64le", "linux-riscv64", "linux-s390x",
+		"netbsd-386", "netbsd-amd64",
+		"openbsd-386", "openbsd-amd64", "openbsd-arm", "openbsd-arm64", "openbsd-mips64":
 
 		cmd := t.addCmd(dt, "misc/cgo/test", t.goTest())
 		cmd.Env = append(os.Environ(), "GOFLAGS=-ldflags=-linkmode=external")
@@ -1444,7 +1436,6 @@ func (t *tester) testDirTest(dt *distTest, shard, shards int) error {
 
 // cgoPackages is the standard packages that use cgo.
 var cgoPackages = []string{
-	"crypto/x509",
 	"net",
 	"os/user",
 }
@@ -1510,6 +1501,7 @@ func (t *tester) makeGOROOTUnwritable() (undo func()) {
 	}
 	gocacheSubdir, _ := filepath.Rel(dir, gocache)
 
+	// Note: Can't use WalkDir here, because this has to compile with Go 1.4.
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if suffix := strings.TrimPrefix(path, dir+string(filepath.Separator)); suffix != "" {
 			if suffix == gocacheSubdir {
@@ -1619,7 +1611,9 @@ func raceDetectorSupported(goos, goarch string) bool {
 	switch goos {
 	case "linux":
 		return goarch == "amd64" || goarch == "ppc64le" || goarch == "arm64"
-	case "darwin", "freebsd", "netbsd", "windows":
+	case "darwin":
+		return goarch == "amd64" || goarch == "arm64"
+	case "freebsd", "netbsd", "windows":
 		return goarch == "amd64"
 	default:
 		return false

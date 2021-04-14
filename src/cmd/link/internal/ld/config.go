@@ -35,11 +35,12 @@ func (mode *BuildMode) Set(s string) error {
 	default:
 		return fmt.Errorf("invalid buildmode: %q", s)
 	case "exe":
-		if objabi.GOOS == "darwin" && objabi.GOARCH == "arm64" {
-			*mode = BuildModePIE // On darwin/arm64 everything is PIE.
-			break
+		switch objabi.GOOS + "/" + objabi.GOARCH {
+		case "darwin/arm64", "windows/arm", "windows/arm64": // On these platforms, everything is PIE
+			*mode = BuildModePIE
+		default:
+			*mode = BuildModeExe
 		}
-		*mode = BuildModeExe
 	case "pie":
 		switch objabi.GOOS {
 		case "aix", "android", "linux", "windows", "darwin", "ios":
@@ -64,7 +65,7 @@ func (mode *BuildMode) Set(s string) error {
 			}
 		case "windows":
 			switch objabi.GOARCH {
-			case "amd64", "386", "arm":
+			case "amd64", "386", "arm", "arm64":
 			default:
 				return badmode()
 			}
@@ -185,7 +186,7 @@ func mustLinkExternal(ctxt *Link) (res bool, reason string) {
 		}()
 	}
 
-	if sys.MustLinkExternal(objabi.GOOS, objabi.GOARCH) && !(objabi.GOOS == "darwin" && objabi.GOARCH == "arm64") { // XXX allow internal linking for darwin/arm64 but not change the default
+	if sys.MustLinkExternal(objabi.GOOS, objabi.GOARCH) {
 		return true, fmt.Sprintf("%s/%s requires external linking", objabi.GOOS, objabi.GOARCH)
 	}
 
@@ -219,7 +220,7 @@ func mustLinkExternal(ctxt *Link) (res bool, reason string) {
 	case BuildModePIE:
 		switch objabi.GOOS + "/" + objabi.GOARCH {
 		case "linux/amd64", "linux/arm64", "android/arm64":
-		case "windows/386", "windows/amd64", "windows/arm":
+		case "windows/386", "windows/amd64", "windows/arm", "windows/arm64":
 		case "darwin/amd64", "darwin/arm64":
 		default:
 			// Internal linking does not support TLS_IE.
@@ -261,8 +262,6 @@ func determineLinkMode(ctxt *Link) {
 		default:
 			if extNeeded || (iscgo && externalobj) {
 				ctxt.LinkMode = LinkExternal
-			} else if ctxt.IsDarwin() && ctxt.IsARM64() {
-				ctxt.LinkMode = LinkExternal // default to external linking for now
 			} else {
 				ctxt.LinkMode = LinkInternal
 			}

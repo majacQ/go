@@ -212,21 +212,7 @@ func isSigned(t *types.Type) bool {
 
 // mergeSym merges two symbolic offsets. There is no real merging of
 // offsets, we just pick the non-nil one.
-func mergeSym(x, y interface{}) interface{} {
-	if x == nil {
-		return y
-	}
-	if y == nil {
-		return x
-	}
-	panic(fmt.Sprintf("mergeSym with two non-nil syms %s %s", x, y))
-}
-
-func canMergeSym(x, y interface{}) bool {
-	return x == nil || y == nil
-}
-
-func mergeSymTyped(x, y Sym) Sym {
+func mergeSym(x, y Sym) Sym {
 	if x == nil {
 		return y
 	}
@@ -234,6 +220,10 @@ func mergeSymTyped(x, y Sym) Sym {
 		return x
 	}
 	panic(fmt.Sprintf("mergeSym with two non-nil syms %v %v", x, y))
+}
+
+func canMergeSym(x, y Sym) bool {
+	return x == nil || y == nil
 }
 
 // canMergeLoadClobber reports whether the load can be merged into target without
@@ -422,12 +412,6 @@ func nto(x int64) int64 {
 	return int64(ntz64(^x))
 }
 
-// log2 returns logarithm in base 2 of uint64(n), with log2(0) = -1.
-// Rounds down.
-func log2(n int64) int64 {
-	return int64(bits.Len64(uint64(n))) - 1
-}
-
 // logX returns logarithm of n base 2.
 // n must be a positive power of 2 (isPowerOfTwoX returns true).
 func log8(n int8) int64 {
@@ -535,6 +519,18 @@ func b2i32(b bool) int32 {
 // A shift is bounded if it is shifting by less than the width of the shifted value.
 func shiftIsBounded(v *Value) bool {
 	return v.AuxInt != 0
+}
+
+// canonLessThan returns whether x is "ordered" less than y, for purposes of normalizing
+// generated code as much as possible.
+func canonLessThan(x, y *Value) bool {
+	if x.Op != y.Op {
+		return x.Op < y.Op
+	}
+	if !x.Pos.SameFileAndLine(y.Pos) {
+		return x.Pos.Before(y.Pos)
+	}
+	return x.ID < y.ID
 }
 
 // truncate64Fto32F converts a float64 value to a float32 preserving the bit pattern
@@ -694,43 +690,53 @@ func opToAuxInt(o Op) int64 {
 	return int64(o)
 }
 
-func auxToString(i interface{}) string {
-	return i.(string)
+// Aux is an interface to hold miscellaneous data in Blocks and Values.
+type Aux interface {
+	CanBeAnSSAAux()
 }
-func auxToSym(i interface{}) Sym {
+
+// stringAux wraps string values for use in Aux.
+type stringAux string
+
+func (stringAux) CanBeAnSSAAux() {}
+
+func auxToString(i Aux) string {
+	return string(i.(stringAux))
+}
+func auxToSym(i Aux) Sym {
 	// TODO: kind of a hack - allows nil interface through
 	s, _ := i.(Sym)
 	return s
 }
-func auxToType(i interface{}) *types.Type {
+func auxToType(i Aux) *types.Type {
 	return i.(*types.Type)
 }
-func auxToCall(i interface{}) *AuxCall {
+func auxToCall(i Aux) *AuxCall {
 	return i.(*AuxCall)
 }
-func auxToS390xCCMask(i interface{}) s390x.CCMask {
+func auxToS390xCCMask(i Aux) s390x.CCMask {
 	return i.(s390x.CCMask)
 }
-func auxToS390xRotateParams(i interface{}) s390x.RotateParams {
+func auxToS390xRotateParams(i Aux) s390x.RotateParams {
 	return i.(s390x.RotateParams)
 }
 
-func stringToAux(s string) interface{} {
+func StringToAux(s string) Aux {
+	return stringAux(s)
+}
+func symToAux(s Sym) Aux {
 	return s
 }
-func symToAux(s Sym) interface{} {
+func callToAux(s *AuxCall) Aux {
 	return s
 }
-func callToAux(s *AuxCall) interface{} {
-	return s
-}
-func typeToAux(t *types.Type) interface{} {
+func typeToAux(t *types.Type) Aux {
 	return t
 }
-func s390xCCMaskToAux(c s390x.CCMask) interface{} {
+func s390xCCMaskToAux(c s390x.CCMask) Aux {
 	return c
 }
-func s390xRotateParamsToAux(r s390x.RotateParams) interface{} {
+func s390xRotateParamsToAux(r s390x.RotateParams) Aux {
 	return r
 }
 
@@ -741,7 +747,7 @@ func uaddOvf(a, b int64) bool {
 
 // de-virtualize an InterCall
 // 'sym' is the symbol for the itab
-func devirt(v *Value, aux interface{}, sym Sym, offset int64) *AuxCall {
+func devirt(v *Value, aux Aux, sym Sym, offset int64) *AuxCall {
 	f := v.Block.Func
 	n, ok := sym.(*obj.LSym)
 	if !ok {
@@ -764,7 +770,7 @@ func devirt(v *Value, aux interface{}, sym Sym, offset int64) *AuxCall {
 
 // de-virtualize an InterLECall
 // 'sym' is the symbol for the itab
-func devirtLESym(v *Value, aux interface{}, sym Sym, offset int64) *obj.LSym {
+func devirtLESym(v *Value, aux Aux, sym Sym, offset int64) *obj.LSym {
 	n, ok := sym.(*obj.LSym)
 	if !ok {
 		return nil
@@ -990,9 +996,10 @@ func flagArg(v *Value) *Value {
 }
 
 // arm64Negate finds the complement to an ARM64 condition code,
-// for example Equal -> NotEqual or LessThan -> GreaterEqual
+// for example !Equal -> NotEqual or !LessThan -> GreaterEqual
 //
-// TODO: add floating-point conditions
+// For floating point, it's more subtle because NaN is unordered. We do
+// !LessThanF -> NotLessThanF, the latter takes care of NaNs.
 func arm64Negate(op Op) Op {
 	switch op {
 	case OpARM64LessThan:
@@ -1016,13 +1023,21 @@ func arm64Negate(op Op) Op {
 	case OpARM64NotEqual:
 		return OpARM64Equal
 	case OpARM64LessThanF:
-		return OpARM64GreaterEqualF
-	case OpARM64GreaterThanF:
-		return OpARM64LessEqualF
+		return OpARM64NotLessThanF
+	case OpARM64NotLessThanF:
+		return OpARM64LessThanF
 	case OpARM64LessEqualF:
+		return OpARM64NotLessEqualF
+	case OpARM64NotLessEqualF:
+		return OpARM64LessEqualF
+	case OpARM64GreaterThanF:
+		return OpARM64NotGreaterThanF
+	case OpARM64NotGreaterThanF:
 		return OpARM64GreaterThanF
 	case OpARM64GreaterEqualF:
-		return OpARM64LessThanF
+		return OpARM64NotGreaterEqualF
+	case OpARM64NotGreaterEqualF:
+		return OpARM64GreaterEqualF
 	default:
 		panic("unreachable")
 	}
@@ -1033,8 +1048,6 @@ func arm64Negate(op Op) Op {
 // that the same result would be produced if the arguments
 // to the flag-generating instruction were reversed, e.g.
 // (InvertFlags (CMP x y)) -> (CMP y x)
-//
-// TODO: add floating-point conditions
 func arm64Invert(op Op) Op {
 	switch op {
 	case OpARM64LessThan:
@@ -1063,6 +1076,14 @@ func arm64Invert(op Op) Op {
 		return OpARM64GreaterEqualF
 	case OpARM64GreaterEqualF:
 		return OpARM64LessEqualF
+	case OpARM64NotLessThanF:
+		return OpARM64NotGreaterThanF
+	case OpARM64NotGreaterThanF:
+		return OpARM64NotLessThanF
+	case OpARM64NotLessEqualF:
+		return OpARM64NotGreaterEqualF
+	case OpARM64NotGreaterEqualF:
+		return OpARM64NotLessEqualF
 	default:
 		panic("unreachable")
 	}
@@ -1443,10 +1464,11 @@ func DecodePPC64RotateMask(sauxint int64) (rotate, mb, me int64, mask uint64) {
 	return
 }
 
-// This verifies that the mask occupies the
-// rightmost bits.
+// This verifies that the mask is a set of
+// consecutive bits including the least
+// significant bit.
 func isPPC64ValidShiftMask(v int64) bool {
-	if ((v + 1) & v) == 0 {
+	if (v != 0) && ((v+1)&v) == 0 {
 		return true
 	}
 	return false
@@ -1589,18 +1611,18 @@ func needRaceCleanup(sym *AuxCall, v *Value) bool {
 	if !f.Config.Race {
 		return false
 	}
-	if !isSameCall(sym, "runtime.racefuncenter") && !isSameCall(sym, "runtime.racefuncexit") {
+	if !isSameCall(sym, "runtime.racefuncenter") && !isSameCall(sym, "runtime.racefuncenterfp") && !isSameCall(sym, "runtime.racefuncexit") {
 		return false
 	}
 	for _, b := range f.Blocks {
 		for _, v := range b.Values {
 			switch v.Op {
 			case OpStaticCall:
-				// Check for racefuncenter will encounter racefuncexit and vice versa.
+				// Check for racefuncenter/racefuncenterfp will encounter racefuncexit and vice versa.
 				// Allow calls to panic*
 				s := v.Aux.(*AuxCall).Fn.String()
 				switch s {
-				case "runtime.racefuncenter", "runtime.racefuncexit",
+				case "runtime.racefuncenter", "runtime.racefuncenterfp", "runtime.racefuncexit",
 					"runtime.panicdivide", "runtime.panicwrap",
 					"runtime.panicshift":
 					continue

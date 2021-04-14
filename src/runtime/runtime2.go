@@ -327,7 +327,7 @@ type gobuf struct {
 	pc   uintptr
 	g    guintptr
 	ctxt unsafe.Pointer
-	ret  sys.Uintreg
+	ret  uintptr
 	lr   uintptr
 	bp   uintptr // for framepointer-enabled architectures
 }
@@ -654,13 +654,17 @@ type p struct {
 	timerModifiedEarliest uint64
 
 	// Per-P GC state
-	gcAssistTime         int64    // Nanoseconds in assistAlloc
-	gcFractionalMarkTime int64    // Nanoseconds in fractional mark worker (atomic)
-	gcBgMarkWorker       guintptr // (atomic)
-	gcMarkWorkerMode     gcMarkWorkerMode
+	gcAssistTime         int64 // Nanoseconds in assistAlloc
+	gcFractionalMarkTime int64 // Nanoseconds in fractional mark worker (atomic)
 
-	// gcMarkWorkerStartTime is the nanotime() at which this mark
-	// worker started.
+	// gcMarkWorkerMode is the mode for the next mark worker to run in.
+	// That is, this is used to communicate with the worker goroutine
+	// selected for immediate execution by
+	// gcController.findRunnableGCWorker. When scheduling other goroutines,
+	// this field must be set to gcMarkWorkerNotWorker.
+	gcMarkWorkerMode gcMarkWorkerMode
+	// gcMarkWorkerStartTime is the nanotime() at which the most recent
+	// mark worker started.
 	gcMarkWorkerStartTime int64
 
 	// gcw is this P's GC work buffer cache. The work buffer is
@@ -674,6 +678,10 @@ type p struct {
 	wbBuf wbBuf
 
 	runSafePointFn uint32 // if 1, run sched.safePointFn at next safe point
+
+	// statsSeq is a counter indicating whether this P is currently
+	// writing any stats. Its value is even when not, odd when it is.
+	statsSeq uint32
 
 	// Lock for timers. We normally access the timers while running
 	// on this P, but the scheduler can also do it from a different P.
@@ -825,10 +833,11 @@ type _func struct {
 	pcfile    uint32
 	pcln      uint32
 	npcdata   uint32
-	cuOffset  uint32  // runtime.cutab offset of this function's CU
-	funcID    funcID  // set for certain special runtime functions
-	_         [2]byte // pad
-	nfuncdata uint8   // must be last
+	cuOffset  uint32 // runtime.cutab offset of this function's CU
+	funcID    funcID // set for certain special runtime functions
+	flag      funcFlag
+	_         [1]byte // pad
+	nfuncdata uint8   // must be last, must end on a uint32-aligned boundary
 }
 
 // Pseudo-Func that is returned for PCs that occur in inlined code.
@@ -845,7 +854,7 @@ type funcinl struct {
 // layout of Itab known to compilers
 // allocated in non-garbage-collected memory
 // Needs to be in sync with
-// ../cmd/compile/internal/gc/reflect.go:/^func.dumptabs.
+// ../cmd/compile/internal/gc/reflect.go:/^func.WriteTabs.
 type itab struct {
 	inter *interfacetype
 	_type *_type
@@ -1044,7 +1053,6 @@ func (w waitReason) String() string {
 }
 
 var (
-	allglen    uintptr
 	allm       *m
 	gomaxprocs int32
 	ncpu       int32
@@ -1052,15 +1060,33 @@ var (
 	sched      schedt
 	newprocs   int32
 
-	// allpLock protects P-less reads and size changes of allp and
-	// idlepMask, and all writes to allp.
+	// allpLock protects P-less reads and size changes of allp, idlepMask,
+	// and timerpMask, and all writes to allp.
 	allpLock mutex
 	// len(allp) == gomaxprocs; may change at safe points, otherwise
 	// immutable.
 	allp []*p
 	// Bitmask of Ps in _Pidle list, one bit per P. Reads and writes must
 	// be atomic. Length may change at safe points.
-	idlepMask pIdleMask
+	//
+	// Each P must update only its own bit. In order to maintain
+	// consistency, a P going idle must the idle mask simultaneously with
+	// updates to the idle P list under the sched.lock, otherwise a racing
+	// pidleget may clear the mask before pidleput sets the mask,
+	// corrupting the bitmap.
+	//
+	// N.B., procresize takes ownership of all Ps in stopTheWorldWithSema.
+	idlepMask pMask
+	// Bitmask of Ps that may have a timer, one bit per P. Reads and writes
+	// must be atomic. Length may change at safe points.
+	timerpMask pMask
+
+	// Pool of GC parked background workers. Entries are type
+	// *gcBgMarkWorkerNode.
+	gcBgMarkWorkerPool lfstack
+
+	// Total number of gcBgMarkWorker goroutines. Protected by worldsema.
+	gcBgMarkWorkerCount int32
 
 	// Information about what cpu features are available.
 	// Packages outside the runtime should not use these
@@ -1080,4 +1106,4 @@ var (
 )
 
 // Must agree with cmd/internal/objabi.Framepointer_enabled.
-const framepointer_enabled = GOARCH == "amd64" || GOARCH == "arm64" && (GOOS == "linux" || GOOS == "darwin" || GOOS == "ios")
+const framepointer_enabled = GOARCH == "amd64" || GOARCH == "arm64"

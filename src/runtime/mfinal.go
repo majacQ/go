@@ -7,6 +7,7 @@
 package runtime
 
 import (
+	"internal/abi"
 	"runtime/internal/atomic"
 	"runtime/internal/sys"
 	"unsafe"
@@ -210,7 +211,7 @@ func runfinq() {
 					// set up with empty interface
 					(*eface)(frame)._type = &f.ot.typ
 					(*eface)(frame).data = f.arg
-					if !ityp.isEmpty() {
+					if len(ityp.mhdr) != 0 {
 						// convert to interface with methods
 						// this conversion is guaranteed to succeed - we checked in SetFinalizer
 						*(*iface)(frame) = assertE2I(ityp, *(*eface)(frame))
@@ -219,7 +220,11 @@ func runfinq() {
 					throw("bad kind in runfinq")
 				}
 				fingRunning = true
-				reflectcall(nil, unsafe.Pointer(f.fn), frame, uint32(framesz), uint32(framesz))
+				// Pass a dummy RegArgs for now.
+				//
+				// TODO(mknyszek): Pass arguments in registers.
+				var regs abi.RegArgs
+				reflectcall(nil, unsafe.Pointer(f.fn), frame, uint32(framesz), uint32(framesz), uint32(framesz), &regs)
 				fingRunning = false
 
 				// Drop finalizer queue heap references
@@ -394,7 +399,7 @@ func SetFinalizer(obj interface{}, finalizer interface{}) {
 		}
 	case fint.kind&kindMask == kindInterface:
 		ityp := (*interfacetype)(unsafe.Pointer(fint))
-		if ityp.isEmpty() {
+		if len(ityp.mhdr) == 0 {
 			// ok - satisfies empty interface
 			goto okarg
 		}

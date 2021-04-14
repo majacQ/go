@@ -200,8 +200,6 @@ func GostringW(w []uint16) (s string) {
 	return
 }
 
-type Uintreg sys.Uintreg
-
 var Open = open
 var Close = closefd
 var Read = read
@@ -743,7 +741,16 @@ func (c *PageCache) Alloc(npages uintptr) (uintptr, uintptr) {
 	return (*pageCache)(c).alloc(npages)
 }
 func (c *PageCache) Flush(s *PageAlloc) {
-	(*pageCache)(c).flush((*pageAlloc)(s))
+	cp := (*pageCache)(c)
+	sp := (*pageAlloc)(s)
+
+	systemstack(func() {
+		// None of the tests need any higher-level locking, so we just
+		// take the lock internally.
+		lock(sp.mheapLock)
+		cp.flush(sp)
+		unlock(sp.mheapLock)
+	})
 }
 
 // Expose chunk index type.
@@ -754,13 +761,41 @@ type ChunkIdx chunkIdx
 type PageAlloc pageAlloc
 
 func (p *PageAlloc) Alloc(npages uintptr) (uintptr, uintptr) {
-	return (*pageAlloc)(p).alloc(npages)
+	pp := (*pageAlloc)(p)
+
+	var addr, scav uintptr
+	systemstack(func() {
+		// None of the tests need any higher-level locking, so we just
+		// take the lock internally.
+		lock(pp.mheapLock)
+		addr, scav = pp.alloc(npages)
+		unlock(pp.mheapLock)
+	})
+	return addr, scav
 }
 func (p *PageAlloc) AllocToCache() PageCache {
-	return PageCache((*pageAlloc)(p).allocToCache())
+	pp := (*pageAlloc)(p)
+
+	var c PageCache
+	systemstack(func() {
+		// None of the tests need any higher-level locking, so we just
+		// take the lock internally.
+		lock(pp.mheapLock)
+		c = PageCache(pp.allocToCache())
+		unlock(pp.mheapLock)
+	})
+	return c
 }
 func (p *PageAlloc) Free(base, npages uintptr) {
-	(*pageAlloc)(p).free(base, npages)
+	pp := (*pageAlloc)(p)
+
+	systemstack(func() {
+		// None of the tests need any higher-level locking, so we just
+		// take the lock internally.
+		lock(pp.mheapLock)
+		pp.free(base, npages)
+		unlock(pp.mheapLock)
+	})
 }
 func (p *PageAlloc) Bounds() (ChunkIdx, ChunkIdx) {
 	return ChunkIdx((*pageAlloc)(p).start), ChunkIdx((*pageAlloc)(p).end)
@@ -768,6 +803,8 @@ func (p *PageAlloc) Bounds() (ChunkIdx, ChunkIdx) {
 func (p *PageAlloc) Scavenge(nbytes uintptr, mayUnlock bool) (r uintptr) {
 	pp := (*pageAlloc)(p)
 	systemstack(func() {
+		// None of the tests need any higher-level locking, so we just
+		// take the lock internally.
 		lock(pp.mheapLock)
 		r = pp.scavenge(nbytes, mayUnlock)
 		unlock(pp.mheapLock)
@@ -926,7 +963,11 @@ func NewPageAlloc(chunks, scav map[ChunkIdx][]BitRange) *PageAlloc {
 		addr := chunkBase(chunkIdx(i))
 
 		// Mark the chunk's existence in the pageAlloc.
-		p.grow(addr, pallocChunkBytes)
+		systemstack(func() {
+			lock(p.mheapLock)
+			p.grow(addr, pallocChunkBytes)
+			unlock(p.mheapLock)
+		})
 
 		// Initialize the bitmap and update pageAlloc metadata.
 		chunk := p.chunkOf(chunkIndex(addr))
@@ -957,13 +998,19 @@ func NewPageAlloc(chunks, scav map[ChunkIdx][]BitRange) *PageAlloc {
 		}
 
 		// Update heap metadata for the allocRange calls above.
-		p.update(addr, pallocChunkPages, false, false)
+		systemstack(func() {
+			lock(p.mheapLock)
+			p.update(addr, pallocChunkPages, false, false)
+			unlock(p.mheapLock)
+		})
 	}
+
 	systemstack(func() {
 		lock(p.mheapLock)
 		p.scavengeStartGen()
 		unlock(p.mheapLock)
 	})
+
 	return (*PageAlloc)(p)
 }
 
@@ -1152,12 +1199,12 @@ type TimeHistogram timeHistogram
 
 // Counts returns the counts for the given bucket, subBucket indices.
 // Returns true if the bucket was valid, otherwise returns the counts
-// for the overflow bucket and false.
+// for the underflow bucket and false.
 func (th *TimeHistogram) Count(bucket, subBucket uint) (uint64, bool) {
 	t := (*timeHistogram)(th)
 	i := bucket*TimeHistNumSubBuckets + subBucket
 	if i >= uint(len(t.counts)) {
-		return t.overflow, false
+		return t.underflow, false
 	}
 	return t.counts[i], true
 }

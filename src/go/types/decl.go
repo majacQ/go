@@ -15,7 +15,7 @@ func (check *Checker) reportAltDecl(obj Object) {
 		// We use "other" rather than "previous" here because
 		// the first declaration seen may not be textually
 		// earlier in the source.
-		check.errorf(pos, "\tother declaration of %s", obj.Name()) // secondary error, \t indented
+		check.errorf(obj, _DuplicateDecl, "\tother declaration of %s", obj.Name()) // secondary error, \t indented
 	}
 }
 
@@ -26,7 +26,7 @@ func (check *Checker) declare(scope *Scope, id *ast.Ident, obj Object, pos token
 	// binding."
 	if obj.Name() != "_" {
 		if alt := scope.Insert(obj); alt != nil {
-			check.errorf(obj.Pos(), "%s redeclared in this block", obj.Name())
+			check.errorf(obj, _DuplicateDecl, "%s redeclared in this block", obj.Name())
 			check.reportAltDecl(alt)
 			return
 		}
@@ -183,13 +183,13 @@ func (check *Checker) objDecl(obj Object, def *Named) {
 	switch obj := obj.(type) {
 	case *Const:
 		check.decl = d // new package-level const decl
-		check.constDecl(obj, d.typ, d.init)
+		check.constDecl(obj, d.typ, d.init, d.inherited)
 	case *Var:
 		check.decl = d // new package-level var decl
 		check.varDecl(obj, d.lhs, d.typ, d.init)
 	case *TypeName:
 		// invalid recursive types are detected via path
-		check.typeDecl(obj, d.typ, def, d.alias)
+		check.typeDecl(obj, d.typ, def, d.aliasPos)
 	case *Func:
 		// functions may be recursive - no need to track dependencies
 		check.funcDecl(obj, d)
@@ -234,7 +234,7 @@ func (check *Checker) cycle(obj Object) (isCycle bool) {
 			// this information explicitly in the object.
 			var alias bool
 			if d := check.objMap[obj]; d != nil {
-				alias = d.alias // package-level object
+				alias = d.aliasPos.IsValid() // package-level object
 			} else {
 				alias = obj.IsAlias() // function local object
 			}
@@ -357,16 +357,16 @@ func (check *Checker) cycleError(cycle []Object) {
 	//           cycle? That would be more consistent with other error messages.
 	i := firstInSrc(cycle)
 	obj := cycle[i]
-	check.errorf(obj.Pos(), "illegal cycle in declaration of %s", obj.Name())
+	check.errorf(obj, _InvalidDeclCycle, "illegal cycle in declaration of %s", obj.Name())
 	for range cycle {
-		check.errorf(obj.Pos(), "\t%s refers to", obj.Name()) // secondary error, \t indented
+		check.errorf(obj, _InvalidDeclCycle, "\t%s refers to", obj.Name()) // secondary error, \t indented
 		i++
 		if i >= len(cycle) {
 			i = 0
 		}
 		obj = cycle[i]
 	}
-	check.errorf(obj.Pos(), "\t%s", obj.Name())
+	check.errorf(obj, _InvalidDeclCycle, "\t%s", obj.Name())
 }
 
 // firstInSrc reports the index of the object with the "smallest"
@@ -388,10 +388,11 @@ type (
 
 	importDecl struct{ spec *ast.ImportSpec }
 	constDecl  struct {
-		spec *ast.ValueSpec
-		iota int
-		typ  ast.Expr
-		init []ast.Expr
+		spec      *ast.ValueSpec
+		iota      int
+		typ       ast.Expr
+		init      []ast.Expr
+		inherited bool
 	}
 	varDecl  struct{ spec *ast.ValueSpec }
 	typeDecl struct{ spec *ast.TypeSpec }
@@ -424,39 +425,46 @@ func (check *Checker) walkDecl(d ast.Decl, f func(decl)) {
 				switch d.Tok {
 				case token.CONST:
 					// determine which initialization expressions to use
+					inherited := true
 					switch {
 					case s.Type != nil || len(s.Values) > 0:
 						last = s
+						inherited = false
 					case last == nil:
 						last = new(ast.ValueSpec) // make sure last exists
+						inherited = false
 					}
 					check.arityMatch(s, last)
-					f(constDecl{spec: s, iota: iota, init: last.Values, typ: last.Type})
+					f(constDecl{spec: s, iota: iota, typ: last.Type, init: last.Values, inherited: inherited})
 				case token.VAR:
 					check.arityMatch(s, nil)
 					f(varDecl{s})
 				default:
-					check.invalidAST(s.Pos(), "invalid token %s", d.Tok)
+					check.invalidAST(s, "invalid token %s", d.Tok)
 				}
 			case *ast.TypeSpec:
 				f(typeDecl{s})
 			default:
-				check.invalidAST(s.Pos(), "unknown ast.Spec node %T", s)
+				check.invalidAST(s, "unknown ast.Spec node %T", s)
 			}
 		}
 	case *ast.FuncDecl:
 		f(funcDecl{d})
 	default:
-		check.invalidAST(d.Pos(), "unknown ast.Decl node %T", d)
+		check.invalidAST(d, "unknown ast.Decl node %T", d)
 	}
 }
 
-func (check *Checker) constDecl(obj *Const, typ, init ast.Expr) {
+func (check *Checker) constDecl(obj *Const, typ, init ast.Expr, inherited bool) {
 	assert(obj.typ == nil)
 
 	// use the correct value of iota
-	defer func(iota constant.Value) { check.iota = iota }(check.iota)
+	defer func(iota constant.Value, errpos positioner) {
+		check.iota = iota
+		check.errpos = errpos
+	}(check.iota, check.errpos)
 	check.iota = obj.val
+	check.errpos = nil
 
 	// provide valid constant value under all circumstances
 	obj.val = constant.MakeUnknown()
@@ -468,7 +476,7 @@ func (check *Checker) constDecl(obj *Const, typ, init ast.Expr) {
 			// don't report an error if the type is an invalid C (defined) type
 			// (issue #22090)
 			if t.Underlying() != Typ[Invalid] {
-				check.errorf(typ.Pos(), "invalid constant type %s", t)
+				check.errorf(typ, _InvalidConstType, "invalid constant type %s", t)
 			}
 			obj.typ = Typ[Invalid]
 			return
@@ -479,6 +487,15 @@ func (check *Checker) constDecl(obj *Const, typ, init ast.Expr) {
 	// check initialization
 	var x operand
 	if init != nil {
+		if inherited {
+			// The initialization expression is inherited from a previous
+			// constant declaration, and (error) positions refer to that
+			// expression and not the current constant declaration. Use
+			// the constant identifier position for any errors during
+			// init expression evaluation since that is all we have
+			// (see issues #42991, #42992).
+			check.errpos = atPos(obj.pos)
+		}
 		check.expr(&x, init)
 	}
 	check.initConst(obj, &x)
@@ -609,14 +626,17 @@ func (n *Named) setUnderlying(typ Type) {
 	}
 }
 
-func (check *Checker) typeDecl(obj *TypeName, typ ast.Expr, def *Named, alias bool) {
+func (check *Checker) typeDecl(obj *TypeName, typ ast.Expr, def *Named, aliasPos token.Pos) {
 	assert(obj.typ == nil)
 
 	check.later(func() {
 		check.validType(obj.typ, nil)
 	})
 
-	if alias {
+	if aliasPos.IsValid() {
+		if !check.allowVersion(obj.pkg, 1, 9) {
+			check.errorf(atPos(aliasPos), _BadDecl, "type aliases requires go1.9 or later")
+		}
 
 		obj.typ = Typ[Invalid]
 		obj.typ = check.typ(typ)
@@ -647,9 +667,12 @@ func (check *Checker) typeDecl(obj *TypeName, typ ast.Expr, def *Named, alias bo
 
 	}
 
+	// TODO(rFindley): move to the callsite, as this is only needed for top-level
+	//                 decls.
 	check.addMethodDecls(obj)
 }
 
+// TODO(rFindley): rename to collectMethods, to be consistent with types2.
 func (check *Checker) addMethodDecls(obj *TypeName) {
 	// get associated methods
 	// (Checker.collectObjects only collects methods with non-blank names;
@@ -660,7 +683,7 @@ func (check *Checker) addMethodDecls(obj *TypeName) {
 		return
 	}
 	delete(check.methods, obj)
-	assert(!check.objMap[obj].alias) // don't use TypeName.IsAlias (requires fully set up object)
+	assert(!check.objMap[obj].aliasPos.IsValid()) // don't use TypeName.IsAlias (requires fully set up object)
 
 	// use an objset to check for name conflicts
 	var mset objset
@@ -694,9 +717,9 @@ func (check *Checker) addMethodDecls(obj *TypeName) {
 		if alt := mset.insert(m); alt != nil {
 			switch alt.(type) {
 			case *Var:
-				check.errorf(m.pos, "field and method with the same name %s", m.name)
+				check.errorf(m, _DuplicateFieldAndMethod, "field and method with the same name %s", m.name)
 			case *Func:
-				check.errorf(m.pos, "method %s already declared for %s", m.name, obj)
+				check.errorf(m, _DuplicateMethod, "method %s already declared for %s", m.name, obj)
 			default:
 				unreachable()
 			}
@@ -720,8 +743,12 @@ func (check *Checker) funcDecl(obj *Func, decl *declInfo) {
 	obj.typ = sig // guard against cycles
 	fdecl := decl.fdecl
 	check.funcType(sig, fdecl.Recv, fdecl.Type)
-	if sig.recv == nil && obj.name == "init" && (sig.params.Len() > 0 || sig.results.Len() > 0) {
-		check.errorf(fdecl.Pos(), "func init must have no arguments and no return values")
+	if sig.recv == nil {
+		if obj.name == "init" && (sig.params.Len() > 0 || sig.results.Len() > 0) {
+			check.errorf(fdecl, _InvalidInitDecl, "func init must have no arguments and no return values")
+		} else if obj.name == "main" && check.pkg.name == "main" && (sig.params.Len() > 0 || sig.results.Len() > 0) {
+			check.errorf(fdecl, _InvalidMainDecl, "func main must have no arguments and no return values")
+		}
 		// ok to continue
 	}
 
@@ -753,7 +780,7 @@ func (check *Checker) declStmt(d ast.Decl) {
 					init = d.init[i]
 				}
 
-				check.constDecl(obj, d.typ, init)
+				check.constDecl(obj, d.typ, init, d.inherited)
 			}
 
 			// process function literals in init expressions before scope changes
@@ -829,10 +856,10 @@ func (check *Checker) declStmt(d ast.Decl) {
 			check.declare(check.scope, d.spec.Name, obj, scopePos)
 			// mark and unmark type before calling typeDecl; its type is still nil (see Checker.objDecl)
 			obj.setColor(grey + color(check.push(obj)))
-			check.typeDecl(obj, d.spec.Type, nil, d.spec.Assign.IsValid())
+			check.typeDecl(obj, d.spec.Type, nil, d.spec.Assign)
 			check.pop().setColor(black)
 		default:
-			check.invalidAST(d.node().Pos(), "unknown ast.Decl node %T", d.node())
+			check.invalidAST(d.node(), "unknown ast.Decl node %T", d.node())
 		}
 	})
 }

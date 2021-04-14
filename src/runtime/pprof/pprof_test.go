@@ -13,7 +13,6 @@ import (
 	"internal/profile"
 	"internal/testenv"
 	"io"
-	"io/ioutil"
 	"math/big"
 	"os"
 	"os/exec"
@@ -280,7 +279,7 @@ func testCPUProfile(t *testing.T, matches matchFunc, need []string, avoid []stri
 
 	broken := false
 	switch runtime.GOOS {
-	case "darwin", "ios", "dragonfly", "netbsd", "illumos", "solaris":
+	case "ios", "dragonfly", "netbsd", "illumos", "solaris":
 		broken = true
 	case "openbsd":
 		if runtime.GOARCH == "arm" || runtime.GOARCH == "arm64" {
@@ -511,8 +510,10 @@ func TestGoroutineSwitch(t *testing.T) {
 		}
 		StopCPUProfile()
 
-		// Read profile to look for entries for runtime.gogo with an attempt at a traceback.
-		// The special entry
+		// Read profile to look for entries for gogo with an attempt at a traceback.
+		// "runtime.gogo" is OK, because that's the part of the context switch
+		// before the actual switch begins. But we should not see "gogo",
+		// aka "gogo<>(SB)", which does the actual switch and is marked SPWRITE.
 		parseProfile(t, prof.Bytes(), func(count uintptr, stk []*profile.Location, _ map[string][]string) {
 			// An entry with two frames with 'System' in its top frame
 			// exists to record a PC without a traceback. Those are okay.
@@ -523,13 +524,19 @@ func TestGoroutineSwitch(t *testing.T) {
 				}
 			}
 
-			// Otherwise, should not see runtime.gogo.
+			// An entry with just one frame is OK too:
+			// it knew to stop at gogo.
+			if len(stk) == 1 {
+				return
+			}
+
+			// Otherwise, should not see gogo.
 			// The place we'd see it would be the inner most frame.
 			name := stk[0].Line[0].Function.Name
-			if name == "runtime.gogo" {
+			if name == "gogo" {
 				var buf bytes.Buffer
 				fprintStack(&buf, stk)
-				t.Fatalf("found profile entry for runtime.gogo:\n%s", buf.String())
+				t.Fatalf("found profile entry for gogo:\n%s", buf.String())
 			}
 		})
 	}
@@ -1175,7 +1182,7 @@ func TestLabelRace(t *testing.T) {
 // Check that there is no deadlock when the program receives SIGPROF while in
 // 64bit atomics' critical section. Used to happen on mips{,le}. See #20146.
 func TestAtomicLoadStore64(t *testing.T) {
-	f, err := ioutil.TempFile("", "profatomic")
+	f, err := os.CreateTemp("", "profatomic")
 	if err != nil {
 		t.Fatalf("TempFile: %v", err)
 	}
@@ -1204,7 +1211,7 @@ func TestAtomicLoadStore64(t *testing.T) {
 func TestTracebackAll(t *testing.T) {
 	// With gccgo, if a profiling signal arrives at the wrong time
 	// during traceback, it may crash or hang. See issue #29448.
-	f, err := ioutil.TempFile("", "proftraceback")
+	f, err := os.CreateTemp("", "proftraceback")
 	if err != nil {
 		t.Fatalf("TempFile: %v", err)
 	}
