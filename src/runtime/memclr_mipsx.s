@@ -14,7 +14,9 @@
 #define MOVWLO  MOVWL
 #endif
 
-// void runtime·memclrNoHeapPointers(void*, uintptr)
+// See memclrNoHeapPointers Go doc for important implementation constraints.
+
+// func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr)
 TEXT runtime·memclrNoHeapPointers(SB),NOSPLIT,$0-8
 	MOVW	n+4(FP), R2
 	MOVW	ptr+0(FP), R1

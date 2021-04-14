@@ -46,8 +46,8 @@ var _ A0 = T0{}
 var _ T0 = A0{}
 
 // But aliases and original types cannot be used with new types based on them.
-var _ N0 = T0{} // ERROR "cannot use T0 literal \(type T0\) as type N0 in assignment|incompatible type"
-var _ N0 = A0{} // ERROR "cannot use T0 literal \(type T0\) as type N0 in assignment|incompatible type"
+var _ N0 = T0{} // ERROR "cannot use T0{} \(type T0\) as type N0 in assignment|incompatible type"
+var _ N0 = A0{} // ERROR "cannot use T0{} \(type T0\) as type N0 in assignment|incompatible type"
 
 var _ A5 = Value{}
 
@@ -82,10 +82,10 @@ func _() {
 	var _ A0 = T0{}
 	var _ T0 = A0{}
 
-	var _ N0 = T0{} // ERROR "cannot use T0 literal \(type T0\) as type N0 in assignment|incompatible type"
-	var _ N0 = A0{} // ERROR "cannot use T0 literal \(type T0\) as type N0 in assignment|incompatible type"
+	var _ N0 = T0{} // ERROR "cannot use T0{} \(type T0\) as type N0 in assignment|incompatible type"
+	var _ N0 = A0{} // ERROR "cannot use T0{} \(type T0\) as type N0 in assignment|incompatible type"
 
-	var _ A5 = Value{} // ERROR "cannot use reflect\.Value literal \(type reflect.Value\) as type A5 in assignment|incompatible type"
+	var _ A5 = Value{} // ERROR "cannot use reflect\.Value{} \(type reflect.Value\) as type A5 in assignment|incompatible type"
 }
 
 // Invalid type alias declarations.
@@ -95,10 +95,10 @@ type _ = reflect.ValueOf // ERROR "reflect.ValueOf is not a type|expected type"
 func (A1) m() {} // ERROR "cannot define new methods on non-local type int|may not define methods on non-local type"
 func (A2) m() {} // ERROR "invalid receiver type"
 func (A3) m() {} // ERROR "cannot define new methods on non-local type reflect.Value|may not define methods on non-local type"
-func (A4) m() {} // ERROR "reflect.Value.m redeclared in this block" "cannot define new methods on non-local type reflect.Value|may not define methods on non-local type"
+func (A4) m() {} // ERROR "cannot define new methods on non-local type reflect.Value|may not define methods on non-local type"
 
 type B1 = struct{}
 
-func (B1) m() {} // ERROR "m redeclared in this block" "invalid receiver type"
+func (B1) m() {} // ERROR "invalid receiver type"
 
 // TODO(gri) expand

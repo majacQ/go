@@ -5,24 +5,26 @@
 package ssa
 
 import (
+	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
 	"fmt"
 )
 
 // A place that an ssa variable can reside.
 type Location interface {
-	Name() string // name to use in assembly templates: %rax, 16(%rsp), ...
+	String() string // name to use in assembly templates: AX, 16(SP), ...
 }
 
-// A Register is a machine register, like %rax.
+// A Register is a machine register, like AX.
 // They are numbered densely from 0 (for each architecture).
 type Register struct {
-	num    int32
+	num    int32 // dense numbering
 	objNum int16 // register number from cmd/internal/obj/$ARCH
+	gcNum  int16 // GC register map number (dense numbering of registers that can contain pointers)
 	name   string
 }
 
-func (r *Register) Name() string {
+func (r *Register) String() string {
 	return r.name
 }
 
@@ -30,6 +32,12 @@ func (r *Register) Name() string {
 // corresponds to this register.
 func (r *Register) ObjNum() int16 {
 	return r.objNum
+}
+
+// GCNum returns the runtime GC register index of r, or -1 if this
+// register can't contain pointers.
+func (r *Register) GCNum() int16 {
+	return r.gcNum
 }
 
 // A LocalSlot is a location in the stack frame, which identifies and stores
@@ -52,7 +60,7 @@ func (r *Register) ObjNum() int16 {
 //                           { N: len, Type: int, Off: 0, SplitOf: parent, SplitOffset: 8}
 //                           parent = &{N: s, Type: string}
 type LocalSlot struct {
-	N    GCNode      // an ONAME *gc.Node representing a stack location.
+	N    *ir.Name    // an ONAME *ir.Name representing a stack location.
 	Type *types.Type // type of slot
 	Off  int64       // offset of slot in N
 
@@ -60,7 +68,7 @@ type LocalSlot struct {
 	SplitOffset int64      // .. at this offset.
 }
 
-func (s LocalSlot) Name() string {
+func (s LocalSlot) String() string {
 	if s.Off == 0 {
 		return fmt.Sprintf("%v[%v]", s.N, s.Type)
 	}
@@ -69,13 +77,39 @@ func (s LocalSlot) Name() string {
 
 type LocPair [2]Location
 
-func (t LocPair) Name() string {
+func (t LocPair) String() string {
 	n0, n1 := "nil", "nil"
 	if t[0] != nil {
-		n0 = t[0].Name()
+		n0 = t[0].String()
 	}
 	if t[1] != nil {
-		n1 = t[1].Name()
+		n1 = t[1].String()
 	}
+	return fmt.Sprintf("<%s,%s>", n0, n1)
+}
+
+type ArgPair struct {
+	reg *Register
+	mem LocalSlot
+}
+
+func (ap *ArgPair) Reg() int16 {
+	return ap.reg.objNum
+}
+
+func (ap *ArgPair) Type() *types.Type {
+	return ap.mem.Type
+}
+
+func (ap *ArgPair) Mem() *LocalSlot {
+	return &ap.mem
+}
+
+func (t ArgPair) String() string {
+	n0 := "nil"
+	if t.reg != nil {
+		n0 = t.reg.String()
+	}
+	n1 := t.mem.String()
 	return fmt.Sprintf("<%s,%s>", n0, n1)
 }

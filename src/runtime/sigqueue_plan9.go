@@ -92,6 +92,13 @@ func sendNote(s *byte) bool {
 	return true
 }
 
+// sigRecvPrepareForFixup is a no-op on plan9. (This would only be
+// called while GC is disabled.)
+//
+//go:nosplit
+func sigRecvPrepareForFixup() {
+}
+
 // Called to receive the next queued signal.
 // Must only be called from a single goroutine at a time.
 //go:linkname signal_recv os/signal.signal_recv
@@ -134,12 +141,9 @@ func signalWaitUntilIdle() {
 //go:linkname signal_enable os/signal.signal_enable
 func signal_enable(s uint32) {
 	if !sig.inuse {
-		// The first call to signal_enable is for us
-		// to use for initialization. It does not pass
-		// signal information in m.
+		// This is the first call to signal_enable. Initialize.
 		sig.inuse = true // enable reception of signals; cannot disable
 		noteclear(&sig.note)
-		return
 	}
 }
 
@@ -151,4 +155,9 @@ func signal_disable(s uint32) {
 // Must only be called from a single goroutine at a time.
 //go:linkname signal_ignore os/signal.signal_ignore
 func signal_ignore(s uint32) {
+}
+
+//go:linkname signal_ignored os/signal.signal_ignored
+func signal_ignored(s uint32) bool {
+	return false
 }

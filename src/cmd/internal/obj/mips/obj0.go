@@ -35,6 +35,7 @@ import (
 	"cmd/internal/sys"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 )
 
@@ -133,31 +134,39 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 	// a switch for enabling/disabling instruction scheduling
 	nosched := true
 
-	if c.cursym.Func.Text == nil || c.cursym.Func.Text.Link == nil {
+	if c.cursym.Func().Text == nil || c.cursym.Func().Text.Link == nil {
 		return
 	}
 
-	p := c.cursym.Func.Text
+	p := c.cursym.Func().Text
 	textstksiz := p.To.Offset
+	if textstksiz == -ctxt.FixedFrameSize() {
+		// Historical way to mark NOFRAME.
+		p.From.Sym.Set(obj.AttrNoFrame, true)
+		textstksiz = 0
+	}
+	if textstksiz < 0 {
+		c.ctxt.Diag("negative frame size %d - did you mean NOFRAME?", textstksiz)
+	}
+	if p.From.Sym.NoFrame() {
+		if textstksiz != 0 {
+			c.ctxt.Diag("NOFRAME functions must have a frame size of 0, not %d", textstksiz)
+		}
+	}
 
-	c.cursym.Func.Args = p.To.Val.(int32)
-	c.cursym.Func.Locals = int32(textstksiz)
+	c.cursym.Func().Args = p.To.Val.(int32)
+	c.cursym.Func().Locals = int32(textstksiz)
 
 	/*
 	 * find leaf subroutines
-	 * strip NOPs
 	 * expand RET
 	 * expand BECOME pseudo
 	 */
 
-	var q *obj.Prog
-	var q1 *obj.Prog
-	for p := c.cursym.Func.Text; p != nil; p = p.Link {
+	for p := c.cursym.Func().Text; p != nil; p = p.Link {
 		switch p.As {
 		/* too hard, just leave alone */
 		case obj.ATEXT:
-			q = p
-
 			p.Mark |= LABEL | LEAF | SYNC
 			if p.Link != nil {
 				p.Link.Mark |= LABEL
@@ -166,7 +175,6 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		/* too hard, just leave alone */
 		case AMOVW,
 			AMOVV:
-			q = p
 			if p.To.Type == obj.TYPE_REG && p.To.Reg >= REG_SPECIAL {
 				p.Mark |= LABEL | SYNC
 				break
@@ -182,11 +190,9 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			ATLBWI,
 			ATLBP,
 			ATLBR:
-			q = p
 			p.Mark |= LABEL | SYNC
 
 		case ANOR:
-			q = p
 			if p.To.Type == obj.TYPE_REG {
 				if p.To.Reg == REGZERO {
 					p.Mark |= LABEL | SYNC
@@ -198,7 +204,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			AJAL,
 			obj.ADUFFZERO,
 			obj.ADUFFCOPY:
-			c.cursym.Func.Text.Mark &^= LEAF
+			c.cursym.Func().Text.Mark &^= LEAF
 			fallthrough
 
 		case AJMP,
@@ -222,12 +228,11 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			} else {
 				p.Mark |= BRANCH
 			}
-			q = p
-			q1 = p.Pcond
+			q1 := p.To.Target()
 			if q1 != nil {
 				for q1.As == obj.ANOP {
 					q1 = q1.Link
-					p.Pcond = q1
+					p.To.SetTarget(q1)
 				}
 
 				if q1.Mark&LEAF == 0 {
@@ -241,24 +246,11 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			if q1 != nil {
 				q1.Mark |= LABEL
 			}
-			continue
 
 		case ARET:
-			q = p
 			if p.Link != nil {
 				p.Link.Mark |= LABEL
 			}
-			continue
-
-		case obj.ANOP:
-			q1 = p.Link
-			q.Link = q1 /* q is non-nop */
-			q1.Mark |= p.Mark
-			continue
-
-		default:
-			q = p
-			continue
 		}
 	}
 
@@ -271,21 +263,50 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		mov = AMOVW
 	}
 
+	var q *obj.Prog
+	var q1 *obj.Prog
 	autosize := int32(0)
 	var p1 *obj.Prog
 	var p2 *obj.Prog
-	for p := c.cursym.Func.Text; p != nil; p = p.Link {
+	for p := c.cursym.Func().Text; p != nil; p = p.Link {
 		o := p.As
 		switch o {
 		case obj.ATEXT:
-			autosize = int32(textstksiz + ctxt.FixedFrameSize())
-			if (p.Mark&LEAF != 0) && autosize <= int32(ctxt.FixedFrameSize()) {
-				autosize = 0
-			} else if autosize&4 != 0 && c.ctxt.Arch.Family == sys.MIPS64 {
+			autosize = int32(textstksiz)
+
+			if p.Mark&LEAF != 0 && autosize == 0 {
+				// A leaf function with no locals has no frame.
+				p.From.Sym.Set(obj.AttrNoFrame, true)
+			}
+
+			if !p.From.Sym.NoFrame() {
+				// If there is a stack frame at all, it includes
+				// space to save the LR.
+				autosize += int32(c.ctxt.FixedFrameSize())
+			}
+
+			if autosize&4 != 0 && c.ctxt.Arch.Family == sys.MIPS64 {
 				autosize += 4
 			}
 
+			if autosize == 0 && c.cursym.Func().Text.Mark&LEAF == 0 {
+				if c.cursym.Func().Text.From.Sym.NoSplit() {
+					if ctxt.Debugvlog {
+						ctxt.Logf("save suppressed in: %s\n", c.cursym.Name)
+					}
+
+					c.cursym.Func().Text.Mark |= LEAF
+				}
+			}
+
 			p.To.Offset = int64(autosize) - ctxt.FixedFrameSize()
+
+			if c.cursym.Func().Text.Mark&LEAF != 0 {
+				c.cursym.Set(obj.AttrLeaf, true)
+				if p.From.Sym.NoFrame() {
+					break
+				}
+			}
 
 			if !p.From.Sym.NoSplit() {
 				p = c.stacksplit(p, autosize) // emit split check
@@ -299,6 +320,10 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 				// Store link register before decrement SP, so if a signal comes
 				// during the execution of the function prologue, the traceback
 				// code will not see a half-updated stack frame.
+				// This sequence is not async preemptible, as if we open a frame
+				// at the current SP, it will clobber the saved LR.
+				q = c.ctxt.StartUnsafePoint(q, c.newprog)
+
 				q = obj.Appendp(q, newprog)
 				q.As = mov
 				q.Pos = p.Pos
@@ -316,22 +341,11 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 				q.To.Type = obj.TYPE_REG
 				q.To.Reg = REGSP
 				q.Spadj = +autosize
-			} else if c.cursym.Func.Text.Mark&LEAF == 0 {
-				if c.cursym.Func.Text.From.Sym.NoSplit() {
-					if ctxt.Debugvlog {
-						ctxt.Logf("save suppressed in: %s\n", c.cursym.Name)
-					}
 
-					c.cursym.Func.Text.Mark |= LEAF
-				}
+				q = c.ctxt.EndUnsafePoint(q, c.newprog, -1)
 			}
 
-			if c.cursym.Func.Text.Mark&LEAF != 0 {
-				c.cursym.Set(obj.AttrLeaf, true)
-				break
-			}
-
-			if c.cursym.Func.Text.From.Sym.Wrapper() {
+			if c.cursym.Func().Text.From.Sym.Wrapper() && c.cursym.Func().Text.Mark&LEAF == 0 {
 				// if(g->panic != nil && g->panic->argp == FP) g->panic->argp = bottom-of-frame
 				//
 				//	MOV	g_panic(g), R1
@@ -346,6 +360,9 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 				//
 				// The NOP is needed to give the jumps somewhere to land.
 				// It is a liblink NOP, not an mips NOP: it encodes to 0 instruction bytes.
+				//
+				// We don't generate this for leafs because that means the wrapped
+				// function was inlined into the wrapper.
 
 				q = obj.Appendp(q, newprog)
 
@@ -408,8 +425,8 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 				q = obj.Appendp(q, newprog)
 
 				q.As = obj.ANOP
-				p1.Pcond = q
-				p2.Pcond = q
+				p1.To.SetTarget(q)
+				p2.To.SetTarget(q)
 			}
 
 		case ARET:
@@ -422,7 +439,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			p.To.Name = obj.NAME_NONE // clear fields as we may modify p to other instruction
 			p.To.Sym = nil
 
-			if c.cursym.Func.Text.Mark&LEAF != 0 {
+			if c.cursym.Func().Text.Mark&LEAF != 0 {
 				if autosize == 0 {
 					p.As = AJMP
 					p.From = obj.Addr{}
@@ -465,10 +482,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			p.From.Offset = 0
 			p.From.Reg = REGSP
 			p.To.Type = obj.TYPE_REG
-			p.To.Reg = REG_R4
-			if retSym != nil { // retjmp from non-leaf, need to restore LINK register
-				p.To.Reg = REGLINK
-			}
+			p.To.Reg = REGLINK
 
 			if autosize != 0 {
 				q = c.newprog()
@@ -494,7 +508,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			} else {
 				q1.To.Type = obj.TYPE_MEM
 				q1.To.Offset = 0
-				q1.To.Reg = REG_R4
+				q1.To.Reg = REGLINK
 			}
 			q1.Mark |= BRANCH
 			q1.Spadj = +autosize
@@ -509,12 +523,40 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			if p.To.Type == obj.TYPE_REG && p.To.Reg == REGSP && p.From.Type == obj.TYPE_CONST {
 				p.Spadj = int32(-p.From.Offset)
 			}
+
+		case obj.AGETCALLERPC:
+			if cursym.Leaf() {
+				/* MOV LR, Rd */
+				p.As = mov
+				p.From.Type = obj.TYPE_REG
+				p.From.Reg = REGLINK
+			} else {
+				/* MOV (RSP), Rd */
+				p.As = mov
+				p.From.Type = obj.TYPE_MEM
+				p.From.Reg = REGSP
+			}
+		}
+
+		if p.To.Type == obj.TYPE_REG && p.To.Reg == REGSP && p.Spadj == 0 {
+			f := c.cursym.Func()
+			if f.FuncFlag&objabi.FuncFlag_SPWRITE == 0 {
+				c.cursym.Func().FuncFlag |= objabi.FuncFlag_SPWRITE
+				if ctxt.Debugvlog || !ctxt.IsAsm {
+					ctxt.Logf("auto-SPWRITE: %s %v\n", c.cursym.Name, p)
+					if !ctxt.IsAsm {
+						ctxt.Diag("invalid auto-SPWRITE in non-assembly")
+						ctxt.DiagFlush()
+						log.Fatalf("bad SPWRITE")
+					}
+				}
+			}
 		}
 	}
 
 	if c.ctxt.Arch.Family == sys.MIPS {
 		// rewrite MOVD into two MOVF in 32-bit mode to avoid unaligned memory access
-		for p = c.cursym.Func.Text; p != nil; p = p1 {
+		for p = c.cursym.Func().Text; p != nil; p = p1 {
 			p1 = p.Link
 
 			if p.As != AMOVD {
@@ -531,20 +573,22 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 			p.Link = q
 			p1 = q.Link
 
-			var regOff int16
+			var addrOff int64
 			if c.ctxt.Arch.ByteOrder == binary.BigEndian {
-				regOff = 1 // load odd register first
+				addrOff = 4 // swap load/save order
 			}
 			if p.From.Type == obj.TYPE_MEM {
 				reg := REG_F0 + (p.To.Reg-REG_F0)&^1
-				p.To.Reg = reg + regOff
-				q.To.Reg = reg + 1 - regOff
-				q.From.Offset += 4
+				p.To.Reg = reg
+				q.To.Reg = reg + 1
+				p.From.Offset += addrOff
+				q.From.Offset += 4 - addrOff
 			} else if p.To.Type == obj.TYPE_MEM {
 				reg := REG_F0 + (p.From.Reg-REG_F0)&^1
-				p.From.Reg = reg + regOff
-				q.From.Reg = reg + 1 - regOff
-				q.To.Offset += 4
+				p.From.Reg = reg
+				q.From.Reg = reg + 1
+				p.To.Offset += addrOff
+				q.To.Offset += 4 - addrOff
 			}
 		}
 	}
@@ -552,7 +596,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 	if nosched {
 		// if we don't do instruction scheduling, simply add
 		// NOP after each branch instruction.
-		for p = c.cursym.Func.Text; p != nil; p = p.Link {
+		for p = c.cursym.Func().Text; p != nil; p = p.Link {
 			if p.Mark&BRANCH != 0 {
 				c.addnop(p)
 			}
@@ -561,10 +605,10 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 	}
 
 	// instruction scheduling
-	q = nil                 // p - 1
-	q1 = c.cursym.Func.Text // top of block
-	o := 0                  // count of instructions
-	for p = c.cursym.Func.Text; p != nil; p = p1 {
+	q = nil                   // p - 1
+	q1 = c.cursym.Func().Text // top of block
+	o := 0                    // count of instructions
+	for p = c.cursym.Func().Text; p != nil; p = p1 {
 		p1 = p.Link
 		o++
 		if p.Mark&NOSCHED != 0 {
@@ -604,11 +648,6 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 }
 
 func (c *ctxt0) stacksplit(p *obj.Prog, framesize int32) *obj.Prog {
-	// Leaf function with no frame is effectively NOSPLIT.
-	if framesize == 0 {
-		return p
-	}
-
 	var mov, add, sub obj.As
 
 	if c.ctxt.Arch.Family == sys.MIPS64 {
@@ -633,6 +672,12 @@ func (c *ctxt0) stacksplit(p *obj.Prog, framesize int32) *obj.Prog {
 	}
 	p.To.Type = obj.TYPE_REG
 	p.To.Reg = REG_R1
+
+	// Mark the stack bound check and morestack call async nonpreemptible.
+	// If we get preempted here, when resumed the preemption request is
+	// cleared, but we'll still call morestack, which will double the stack
+	// unnecessarily. See issue #35470.
+	p = c.ctxt.StartUnsafePoint(p, c.newprog)
 
 	var q *obj.Prog
 	if framesize <= objabi.StackSmall {
@@ -702,7 +747,7 @@ func (c *ctxt0) stacksplit(p *obj.Prog, framesize int32) *obj.Prog {
 		p = obj.Appendp(p, c.newprog)
 		p.As = add
 		p.From.Type = obj.TYPE_CONST
-		p.From.Offset = objabi.StackGuard
+		p.From.Offset = int64(objabi.StackGuard)
 		p.Reg = REGSP
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_R2
@@ -717,7 +762,7 @@ func (c *ctxt0) stacksplit(p *obj.Prog, framesize int32) *obj.Prog {
 		p = obj.Appendp(p, c.newprog)
 		p.As = mov
 		p.From.Type = obj.TYPE_CONST
-		p.From.Offset = int64(framesize) + objabi.StackGuard - objabi.StackSmall
+		p.From.Offset = int64(framesize) + int64(objabi.StackGuard) - objabi.StackSmall
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_R1
 
@@ -749,9 +794,11 @@ func (c *ctxt0) stacksplit(p *obj.Prog, framesize int32) *obj.Prog {
 	p.To.Type = obj.TYPE_REG
 	p.To.Reg = REG_R3
 	if q != nil {
-		q.Pcond = p
+		q.To.SetTarget(p)
 		p.Mark |= LABEL
 	}
+
+	p = c.ctxt.EmitEntryStackMap(c.cursym, p, c.newprog)
 
 	// JAL	runtime.morestack(SB)
 	p = obj.Appendp(p, c.newprog)
@@ -760,26 +807,28 @@ func (c *ctxt0) stacksplit(p *obj.Prog, framesize int32) *obj.Prog {
 	p.To.Type = obj.TYPE_BRANCH
 	if c.cursym.CFunc() {
 		p.To.Sym = c.ctxt.Lookup("runtime.morestackc")
-	} else if !c.cursym.Func.Text.From.Sym.NeedCtxt() {
+	} else if !c.cursym.Func().Text.From.Sym.NeedCtxt() {
 		p.To.Sym = c.ctxt.Lookup("runtime.morestack_noctxt")
 	} else {
 		p.To.Sym = c.ctxt.Lookup("runtime.morestack")
 	}
 	p.Mark |= BRANCH
 
+	p = c.ctxt.EndUnsafePoint(p, c.newprog, -1)
+
 	// JMP	start
 	p = obj.Appendp(p, c.newprog)
 
 	p.As = AJMP
 	p.To.Type = obj.TYPE_BRANCH
-	p.Pcond = c.cursym.Func.Text.Link
+	p.To.SetTarget(c.cursym.Func().Text.Link)
 	p.Mark |= BRANCH
 
 	// placeholder for q1's jump target
 	p = obj.Appendp(p, c.newprog)
 
 	p.As = obj.ANOP // zero-width place holder
-	q1.Pcond = p
+	q1.To.SetTarget(p)
 
 	return p
 }
@@ -854,21 +903,20 @@ func (c *ctxt0) sched(p0, pe *obj.Prog) {
 			t = sch[j:]
 			if t[0].comp {
 				if s[0].p.Mark&BRANCH != 0 {
-					goto no2
+					continue
 				}
 			}
 			if t[0].p.Mark&DELAY != 0 {
 				if -cap(s) >= -cap(se) || conflict(&t[0], &s[1]) {
-					goto no2
+					continue
 				}
 			}
 			for u := t[1:]; -cap(u) <= -cap(s); u = u[1:] {
 				if c.depend(&u[0], &t[0]) {
-					goto no2
+					continue
 				}
 			}
 			goto out2
-		no2:
 		}
 
 		if s[0].p.Mark&BRANCH != 0 {
@@ -1389,33 +1437,37 @@ func (c *ctxt0) compound(p *obj.Prog) bool {
 }
 
 var Linkmips64 = obj.LinkArch{
-	Arch:       sys.ArchMIPS64,
-	Init:       buildop,
-	Preprocess: preprocess,
-	Assemble:   span0,
-	Progedit:   progedit,
+	Arch:           sys.ArchMIPS64,
+	Init:           buildop,
+	Preprocess:     preprocess,
+	Assemble:       span0,
+	Progedit:       progedit,
+	DWARFRegisters: MIPSDWARFRegisters,
 }
 
 var Linkmips64le = obj.LinkArch{
-	Arch:       sys.ArchMIPS64LE,
-	Init:       buildop,
-	Preprocess: preprocess,
-	Assemble:   span0,
-	Progedit:   progedit,
+	Arch:           sys.ArchMIPS64LE,
+	Init:           buildop,
+	Preprocess:     preprocess,
+	Assemble:       span0,
+	Progedit:       progedit,
+	DWARFRegisters: MIPSDWARFRegisters,
 }
 
 var Linkmips = obj.LinkArch{
-	Arch:       sys.ArchMIPS,
-	Init:       buildop,
-	Preprocess: preprocess,
-	Assemble:   span0,
-	Progedit:   progedit,
+	Arch:           sys.ArchMIPS,
+	Init:           buildop,
+	Preprocess:     preprocess,
+	Assemble:       span0,
+	Progedit:       progedit,
+	DWARFRegisters: MIPSDWARFRegisters,
 }
 
 var Linkmipsle = obj.LinkArch{
-	Arch:       sys.ArchMIPSLE,
-	Init:       buildop,
-	Preprocess: preprocess,
-	Assemble:   span0,
-	Progedit:   progedit,
+	Arch:           sys.ArchMIPSLE,
+	Init:           buildop,
+	Preprocess:     preprocess,
+	Assemble:       span0,
+	Progedit:       progedit,
+	DWARFRegisters: MIPSDWARFRegisters,
 }

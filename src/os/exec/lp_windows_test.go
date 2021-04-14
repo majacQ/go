@@ -2,13 +2,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package exec
+// Use an external test to avoid os/exec -> internal/testenv -> os/exec
+// circular dependency.
+
+package exec_test
 
 import (
 	"fmt"
+	"internal/testenv"
 	"io"
-	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -63,7 +67,7 @@ type lookPathTest struct {
 }
 
 func (test lookPathTest) runProg(t *testing.T, env []string, args ...string) (string, error) {
-	cmd := Command(args[0], args[1:]...)
+	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = env
 	cmd.Dir = test.rootDir
 	args[0] = filepath.Base(args[0])
@@ -112,7 +116,7 @@ func createEnv(dir, PATH, PATHEXT string) []string {
 		dirs[i] = filepath.Join(dir, dirs[i])
 	}
 	path := strings.Join(dirs, ";")
-	env = updateEnv(env, "PATH", path)
+	env = updateEnv(env, "PATH", os.Getenv("SystemRoot")+"/System32;"+path)
 	return env
 }
 
@@ -139,7 +143,7 @@ func (test lookPathTest) run(t *testing.T, tmpdir, printpathExe string) {
 	if errCmd == nil && errLP == nil {
 		// both succeeded
 		if should != have {
-			t.Fatalf("test=%+v failed: expected to find %q, but found %q", test, should, have)
+			t.Fatalf("test=%+v:\ncmd /c ran: %s\nlookpath found: %s", test, should, have)
 		}
 		return
 	}
@@ -302,7 +306,7 @@ var lookPathTests = []lookPathTest{
 }
 
 func TestLookPath(t *testing.T) {
-	tmp, err := ioutil.TempDir("", "TestLookPath")
+	tmp, err := os.MkdirTemp("", "TestLookPath")
 	if err != nil {
 		t.Fatal("TempDir failed: ", err)
 	}
@@ -312,12 +316,17 @@ func TestLookPath(t *testing.T) {
 
 	// Run all tests.
 	for i, test := range lookPathTests {
-		dir := filepath.Join(tmp, "d"+strconv.Itoa(i))
-		err := os.Mkdir(dir, 0700)
-		if err != nil {
-			t.Fatal("Mkdir failed: ", err)
-		}
-		test.run(t, dir, printpathExe)
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			if i == 16 {
+				t.Skip("golang.org/issue/44379")
+			}
+			dir := filepath.Join(tmp, "d"+strconv.Itoa(i))
+			err := os.Mkdir(dir, 0700)
+			if err != nil {
+				t.Fatal("Mkdir failed: ", err)
+			}
+			test.run(t, dir, printpathExe)
+		})
 	}
 }
 
@@ -346,7 +355,7 @@ func (test commandTest) isSuccess(rootDir, output string, err error) error {
 }
 
 func (test commandTest) runOne(rootDir string, env []string, dir, arg0 string) error {
-	cmd := Command(os.Args[0], "-test.run=TestHelperProcess", "--", "exec", dir, arg0)
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess", "--", "exec", dir, arg0)
 	cmd.Dir = rootDir
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
@@ -499,7 +508,7 @@ var commandTests = []commandTest{
 }
 
 func TestCommand(t *testing.T) {
-	tmp, err := ioutil.TempDir("", "TestCommand")
+	tmp, err := os.MkdirTemp("", "TestCommand")
 	if err != nil {
 		t.Fatal("TempDir failed: ", err)
 	}
@@ -524,7 +533,7 @@ func TestCommand(t *testing.T) {
 func buildPrintPathExe(t *testing.T, dir string) string {
 	const name = "printpath"
 	srcname := name + ".go"
-	err := ioutil.WriteFile(filepath.Join(dir, srcname), []byte(printpathSrc), 0644)
+	err := os.WriteFile(filepath.Join(dir, srcname), []byte(printpathSrc), 0644)
 	if err != nil {
 		t.Fatalf("failed to create source: %v", err)
 	}
@@ -532,7 +541,7 @@ func buildPrintPathExe(t *testing.T, dir string) string {
 		t.Fatalf("failed to execute template: %v", err)
 	}
 	outname := name + ".exe"
-	cmd := Command("go", "build", "-o", outname, srcname)
+	cmd := exec.Command(testenv.GoToolPath(t), "build", "-o", outname, srcname)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -12,13 +12,14 @@ import (
 	"sync"
 )
 
-// tooBig provides a sanity check for sizes; used in several places.
-// Upper limit of 1GB, allowing room to grow a little without overflow.
-// TODO: make this adjustable?
-const tooBig = 1 << 30
+// tooBig provides a sanity check for sizes; used in several places. Upper limit
+// of is 1GB on 32-bit systems, 8GB on 64-bit, allowing room to grow a little
+// without overflow.
+const tooBig = (1 << 30) << (^uint(0) >> 62)
 
 // A Decoder manages the receipt of type and data information read from the
-// remote side of a connection.
+// remote side of a connection.  It is safe for concurrent use by multiple
+// goroutines.
 //
 // The Decoder does only basic sanity checking on decoded input sizes,
 // and its limits are not configurable. Take caution when decoding gob data
@@ -55,7 +56,7 @@ func NewDecoder(r io.Reader) *Decoder {
 
 // recvType loads the definition of a type.
 func (dec *Decoder) recvType(id typeId) {
-	// Have we already seen this type?  That's an error
+	// Have we already seen this type? That's an error
 	if id < firstUserId || dec.wireType[id] != nil {
 		dec.err = errors.New("gob: duplicate type received")
 		return
@@ -99,10 +100,8 @@ func (dec *Decoder) readMessage(nbytes int) {
 	// Read the data
 	dec.buf.Size(nbytes)
 	_, dec.err = io.ReadFull(dec.r, dec.buf.Bytes())
-	if dec.err != nil {
-		if dec.err == io.EOF {
-			dec.err = io.ErrUnexpectedEOF
-		}
+	if dec.err == io.EOF {
+		dec.err = io.ErrUnexpectedEOF
 	}
 }
 

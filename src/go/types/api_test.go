@@ -26,7 +26,6 @@ func pkgFor(path, source string, info *Info) (*Package, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	conf := Config{Importer: importer.Default()}
 	return conf.Check(f.Name.Name, fset, []*ast.File{f}, info)
 }
@@ -41,6 +40,20 @@ func mustTypecheck(t *testing.T, path, source string, info *Info) string {
 		t.Fatalf("%s: didn't type-check (%s)", name, err)
 	}
 	return pkg.Name()
+}
+
+func mayTypecheck(t *testing.T, path, source string, info *Info) (string, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, source, 0)
+	if f == nil { // ignore errors unless f is nil
+		t.Fatalf("%s: unable to parse: %s", path, err)
+	}
+	conf := Config{
+		Error:    func(err error) {},
+		Importer: importer.Default(),
+	}
+	pkg, err := conf.Check(f.Name.Name, fset, []*ast.File{f}, info)
+	return pkg.Name(), err
 }
 
 func TestValuesInfo(t *testing.T) {
@@ -87,6 +100,10 @@ func TestValuesInfo(t *testing.T) {
 		{`package c5a; var _ = string("foo")`, `"foo"`, `string`, `"foo"`},
 		{`package c5b; var _ = string("foo")`, `string("foo")`, `string`, `"foo"`},
 		{`package c5c; type T string; var _ = T("foo")`, `T("foo")`, `c5c.T`, `"foo"`},
+		{`package c5d; var _ = string(65)`, `65`, `untyped int`, `65`},
+		{`package c5e; var _ = string('A')`, `'A'`, `untyped rune`, `65`},
+		{`package c5f; type T string; var _ = T('A')`, `'A'`, `untyped rune`, `65`},
+		{`package c5g; var s uint; var _ = string(1 << s)`, `1 << s`, `untyped int`, ``},
 
 		{`package d0; var _ = []byte("foo")`, `"foo"`, `string`, `"foo"`},
 		{`package d1; var _ = []byte(string("foo"))`, `"foo"`, `string`, `"foo"`},
@@ -114,6 +131,8 @@ func TestValuesInfo(t *testing.T) {
 		{`package f7a; var _ complex128 = -1e-2000i`, `-1e-2000i`, `complex128`, `(0 + 0i)`},
 		{`package f6b; var _            =  1e-2000i`, `1e-2000i`, `complex128`, `(0 + 0i)`},
 		{`package f7b; var _            = -1e-2000i`, `-1e-2000i`, `complex128`, `(0 + 0i)`},
+
+		{`package g0; const (a = len([iota]int{}); b; c); const _ = c`, `c`, `int`, `2`}, // issue #22341
 	}
 
 	for _, test := range tests {
@@ -122,7 +141,7 @@ func TestValuesInfo(t *testing.T) {
 		}
 		name := mustTypecheck(t, "ValuesInfo", test.src, &info)
 
-		// look for constant expression
+		// look for expression
 		var expr ast.Expr
 		for e := range info.Types {
 			if ExprString(e) == test.expr {
@@ -142,14 +161,23 @@ func TestValuesInfo(t *testing.T) {
 			continue
 		}
 
-		// check that value is correct
-		if got := tv.Value.ExactString(); got != test.val {
-			t.Errorf("package %s: got value %s; want %s", name, got, test.val)
+		// if we have a constant, check that value is correct
+		if tv.Value != nil {
+			if got := tv.Value.ExactString(); got != test.val {
+				t.Errorf("package %s: got value %s; want %s", name, got, test.val)
+			}
+		} else {
+			if test.val != "" {
+				t.Errorf("package %s: no constant found; want %s", name, test.val)
+			}
 		}
 	}
 }
 
 func TestTypesInfo(t *testing.T) {
+	// Test sources that are not expected to typecheck must start with the broken prefix.
+	const broken = "package broken_"
+
 	var tests = []struct {
 		src  string
 		expr string // expression
@@ -161,6 +189,39 @@ func TestTypesInfo(t *testing.T) {
 		{`package b2; var x interface{} = 0.`, `0.`, `float64`},
 		{`package b3; var x interface{} = 0i`, `0i`, `complex128`},
 		{`package b4; var x interface{} = "foo"`, `"foo"`, `string`},
+
+		// uses of nil
+		{`package n0; var _ *int = nil`, `nil`, `untyped nil`},
+		{`package n1; var _ func() = nil`, `nil`, `untyped nil`},
+		{`package n2; var _ []byte = nil`, `nil`, `untyped nil`},
+		{`package n3; var _ map[int]int = nil`, `nil`, `untyped nil`},
+		{`package n4; var _ chan int = nil`, `nil`, `untyped nil`},
+		{`package n5; var _ interface{} = nil`, `nil`, `untyped nil`},
+		{`package n6; import "unsafe"; var _ unsafe.Pointer = nil`, `nil`, `untyped nil`},
+
+		{`package n10; var (x *int; _ = x == nil)`, `nil`, `untyped nil`},
+		{`package n11; var (x func(); _ = x == nil)`, `nil`, `untyped nil`},
+		{`package n12; var (x []byte; _ = x == nil)`, `nil`, `untyped nil`},
+		{`package n13; var (x map[int]int; _ = x == nil)`, `nil`, `untyped nil`},
+		{`package n14; var (x chan int; _ = x == nil)`, `nil`, `untyped nil`},
+		{`package n15; var (x interface{}; _ = x == nil)`, `nil`, `untyped nil`},
+		{`package n15; import "unsafe"; var (x unsafe.Pointer; _ = x == nil)`, `nil`, `untyped nil`},
+
+		{`package n20; var _ = (*int)(nil)`, `nil`, `untyped nil`},
+		{`package n21; var _ = (func())(nil)`, `nil`, `untyped nil`},
+		{`package n22; var _ = ([]byte)(nil)`, `nil`, `untyped nil`},
+		{`package n23; var _ = (map[int]int)(nil)`, `nil`, `untyped nil`},
+		{`package n24; var _ = (chan int)(nil)`, `nil`, `untyped nil`},
+		{`package n25; var _ = (interface{})(nil)`, `nil`, `untyped nil`},
+		{`package n26; import "unsafe"; var _ = unsafe.Pointer(nil)`, `nil`, `untyped nil`},
+
+		{`package n30; func f(*int) { f(nil) }`, `nil`, `untyped nil`},
+		{`package n31; func f(func()) { f(nil) }`, `nil`, `untyped nil`},
+		{`package n32; func f([]byte) { f(nil) }`, `nil`, `untyped nil`},
+		{`package n33; func f(map[int]int) { f(nil) }`, `nil`, `untyped nil`},
+		{`package n34; func f(chan int) { f(nil) }`, `nil`, `untyped nil`},
+		{`package n35; func f(interface{}) { f(nil) }`, `nil`, `untyped nil`},
+		{`package n35; import "unsafe"; func f(unsafe.Pointer) { f(nil) }`, `nil`, `untyped nil`},
 
 		// comma-ok expressions
 		{`package p0; var x interface{}; var _, _ = x.(int)`,
@@ -231,11 +292,39 @@ func TestTypesInfo(t *testing.T) {
 			`<-ch`,
 			`(string, bool)`,
 		},
+
+		// issue 28277
+		{`package issue28277_a; func f(...int)`,
+			`...int`,
+			`[]int`,
+		},
+		{`package issue28277_b; func f(a, b int, c ...[]struct{})`,
+			`...[]struct{}`,
+			`[][]struct{}`,
+		},
+
+		// tests for broken code that doesn't parse or type-check
+		{broken + `x0; func _() { var x struct {f string}; x.f := 0 }`, `x.f`, `string`},
+		{broken + `x1; func _() { var z string; type x struct {f string}; y := &x{q: z}}`, `z`, `string`},
+		{broken + `x2; func _() { var a, b string; type x struct {f string}; z := &x{f: a; f: b;}}`, `b`, `string`},
+		{broken + `x3; var x = panic("");`, `panic`, `func(interface{})`},
+		{`package x4; func _() { panic("") }`, `panic`, `func(interface{})`},
+		{broken + `x5; func _() { var x map[string][...]int; x = map[string][...]int{"": {1,2,3}} }`, `x`, `map[string][-1]int`},
 	}
 
 	for _, test := range tests {
 		info := Info{Types: make(map[ast.Expr]TypeAndValue)}
-		name := mustTypecheck(t, "TypesInfo", test.src, &info)
+		var name string
+		if strings.HasPrefix(test.src, broken) {
+			var err error
+			name, err = mayTypecheck(t, "TypesInfo", test.src, &info)
+			if err == nil {
+				t.Errorf("package %s: expected to fail but passed", name)
+				continue
+			}
+		} else {
+			name = mustTypecheck(t, "TypesInfo", test.src, &info)
+		}
 
 		// look for expression type
 		var typ Type
@@ -253,6 +342,63 @@ func TestTypesInfo(t *testing.T) {
 		// check that type is correct
 		if got := typ.String(); got != test.typ {
 			t.Errorf("package %s: got %s; want %s", name, got, test.typ)
+		}
+	}
+}
+
+func TestImplicitsInfo(t *testing.T) {
+	testenv.MustHaveGoBuild(t)
+
+	var tests = []struct {
+		src  string
+		want string
+	}{
+		{`package p2; import . "fmt"; var _ = Println`, ""},           // no Implicits entry
+		{`package p0; import local "fmt"; var _ = local.Println`, ""}, // no Implicits entry
+		{`package p1; import "fmt"; var _ = fmt.Println`, "importSpec: package fmt"},
+
+		{`package p3; func f(x interface{}) { switch x.(type) { case int: } }`, ""}, // no Implicits entry
+		{`package p4; func f(x interface{}) { switch t := x.(type) { case int: _ = t } }`, "caseClause: var t int"},
+		{`package p5; func f(x interface{}) { switch t := x.(type) { case int, uint: _ = t } }`, "caseClause: var t interface{}"},
+		{`package p6; func f(x interface{}) { switch t := x.(type) { default: _ = t } }`, "caseClause: var t interface{}"},
+
+		{`package p7; func f(x int) {}`, ""}, // no Implicits entry
+		{`package p8; func f(int) {}`, "field: var  int"},
+		{`package p9; func f() (complex64) { return 0 }`, "field: var  complex64"},
+		{`package p10; type T struct{}; func (*T) f() {}`, "field: var  *p10.T"},
+	}
+
+	for _, test := range tests {
+		info := Info{
+			Implicits: make(map[ast.Node]Object),
+		}
+		name := mustTypecheck(t, "ImplicitsInfo", test.src, &info)
+
+		// the test cases expect at most one Implicits entry
+		if len(info.Implicits) > 1 {
+			t.Errorf("package %s: %d Implicits entries found", name, len(info.Implicits))
+			continue
+		}
+
+		// extract Implicits entry, if any
+		var got string
+		for n, obj := range info.Implicits {
+			switch x := n.(type) {
+			case *ast.ImportSpec:
+				got = "importSpec"
+			case *ast.CaseClause:
+				got = "caseClause"
+			case *ast.Field:
+				got = "field"
+			default:
+				t.Fatalf("package %s: unexpected %T", name, x)
+			}
+			got += ": " + obj.String()
+		}
+
+		// verify entry
+		if got != test.want {
+			t.Errorf("package %s: got %q; want %q", name, got, test.want)
 		}
 	}
 }
@@ -299,6 +445,8 @@ func TestPredicatesInfo(t *testing.T) {
 		{`package t0; type _ int`, `int`, `type`},
 		{`package t1; type _ []int`, `[]int`, `type`},
 		{`package t2; type _ func()`, `func()`, `type`},
+		{`package t3; type _ func(int)`, `int`, `type`},
+		{`package t3; type _ func(...int)`, `...int`, `type`},
 
 		// built-ins
 		{`package b0; var _ = len("")`, `len`, `builtin`},
@@ -1130,6 +1278,50 @@ func F(){
 	}
 }
 
+func TestConvertibleTo(t *testing.T) {
+	for _, test := range []struct {
+		v, t Type
+		want bool
+	}{
+		{Typ[Int], Typ[Int], true},
+		{Typ[Int], Typ[Float32], true},
+		{newDefined(Typ[Int]), Typ[Int], true},
+		{newDefined(new(Struct)), new(Struct), true},
+		{newDefined(Typ[Int]), new(Struct), false},
+		{Typ[UntypedInt], Typ[Int], true},
+		// Untyped string values are not permitted by the spec, so the below
+		// behavior is undefined.
+		{Typ[UntypedString], Typ[String], true},
+	} {
+		if got := ConvertibleTo(test.v, test.t); got != test.want {
+			t.Errorf("ConvertibleTo(%v, %v) = %t, want %t", test.v, test.t, got, test.want)
+		}
+	}
+}
+
+func TestAssignableTo(t *testing.T) {
+	for _, test := range []struct {
+		v, t Type
+		want bool
+	}{
+		{Typ[Int], Typ[Int], true},
+		{Typ[Int], Typ[Float32], false},
+		{newDefined(Typ[Int]), Typ[Int], false},
+		{newDefined(new(Struct)), new(Struct), true},
+		{Typ[UntypedBool], Typ[Bool], true},
+		{Typ[UntypedString], Typ[Bool], false},
+		// Neither untyped string nor untyped numeric assignments arise during
+		// normal type checking, so the below behavior is technically undefined by
+		// the spec.
+		{Typ[UntypedString], Typ[String], true},
+		{Typ[UntypedInt], Typ[Int], true},
+	} {
+		if got := AssignableTo(test.v, test.t); got != test.want {
+			t.Errorf("AssignableTo(%v, %v) = %t, want %t", test.v, test.t, got, test.want)
+		}
+	}
+}
+
 func TestIdentical_issue15173(t *testing.T) {
 	// Identical should allow nil arguments and be symmetric.
 	for _, test := range []struct {
@@ -1304,7 +1496,7 @@ func TestFailedImport(t *testing.T) {
 	const src = `
 package p
 
-import "foo" // should only see an error here
+import foo "go/types/thisdirectorymustnotexistotherwisethistestmayfail/foo" // should only see an error here
 
 const c = foo.C
 type T = foo.T
@@ -1324,7 +1516,7 @@ func f(x T) T { return foo.F(x) }
 		conf := Config{
 			Error: func(err error) {
 				// we should only see the import error
-				if errcount > 0 || !strings.Contains(err.Error(), "could not import foo") {
+				if errcount > 0 || !strings.Contains(err.Error(), "could not import") {
 					t.Errorf("for %s importer, got unexpected error: %v", compiler, err)
 				}
 				errcount++

@@ -7,6 +7,7 @@
 package runtime
 
 import (
+	"internal/abi"
 	"runtime/internal/atomic"
 	"runtime/internal/sys"
 	"unsafe"
@@ -88,7 +89,7 @@ func queuefinalizer(p unsafe.Pointer, fn *funcval, nret uintptr, fint *_type, ot
 	lock(&finlock)
 	if finq == nil || finq.cnt == uint32(len(finq.fin)) {
 		if finc == nil {
-			finc = (*finblock)(persistentalloc(_FinBlockSize, 0, &memstats.gc_sys))
+			finc = (*finblock)(persistentalloc(_FinBlockSize, 0, &memstats.gcMiscSys))
 			finc.alllink = allfin
 			allfin = finc
 			if finptrmask[0] == 0 {
@@ -172,7 +173,7 @@ func runfinq() {
 			gp := getg()
 			fing = gp
 			fingwait = true
-			goparkunlock(&finlock, "finalizer wait", traceEvGoBlock, 1)
+			goparkunlock(&finlock, waitReasonFinalizerWait, traceEvGoBlock, 1)
 			continue
 		}
 		unlock(&finlock)
@@ -219,7 +220,11 @@ func runfinq() {
 					throw("bad kind in runfinq")
 				}
 				fingRunning = true
-				reflectcall(nil, unsafe.Pointer(f.fn), frame, uint32(framesz), uint32(framesz))
+				// Pass a dummy RegArgs for now.
+				//
+				// TODO(mknyszek): Pass arguments in registers.
+				var regs abi.RegArgs
+				reflectcall(nil, unsafe.Pointer(f.fn), frame, uint32(framesz), uint32(framesz), uint32(framesz), &regs)
 				fingRunning = false
 
 				// Drop finalizer queue heap references
@@ -267,8 +272,8 @@ func runfinq() {
 // is not guaranteed to run, because there is no ordering that
 // respects the dependencies.
 //
-// The finalizer for obj is scheduled to run at some arbitrary time after
-// obj becomes unreachable.
+// The finalizer is scheduled to run at some arbitrary time after the
+// program can no longer reach the object to which obj points.
 // There is no guarantee that finalizers will run before a program exits,
 // so typically they are useful only for releasing non-memory resources
 // associated with an object during a long-running program.
@@ -293,15 +298,15 @@ func runfinq() {
 // pass the object to a call of the KeepAlive function to mark the
 // last point in the function where the object must be reachable.
 //
-// For example, if p points to a struct that contains a file descriptor d,
-// and p has a finalizer that closes that file descriptor, and if the last
-// use of p in a function is a call to syscall.Write(p.d, buf, size), then
-// p may be unreachable as soon as the program enters syscall.Write. The
-// finalizer may run at that moment, closing p.d, causing syscall.Write
-// to fail because it is writing to a closed file descriptor (or, worse,
-// to an entirely different file descriptor opened by a different goroutine).
-// To avoid this problem, call runtime.KeepAlive(p) after the call to
-// syscall.Write.
+// For example, if p points to a struct, such as os.File, that contains
+// a file descriptor d, and p has a finalizer that closes that file
+// descriptor, and if the last use of p in a function is a call to
+// syscall.Write(p.d, buf, size), then p may be unreachable as soon as
+// the program enters syscall.Write. The finalizer may run at that moment,
+// closing p.d, causing syscall.Write to fail because it is writing to
+// a closed file descriptor (or, worse, to an entirely different
+// file descriptor opened by a different goroutine). To avoid this problem,
+// call runtime.KeepAlive(p) after the call to syscall.Write.
 //
 // A single goroutine runs all finalizers for a program, sequentially.
 // If a finalizer must run for a long time, it should do so by starting
@@ -326,9 +331,9 @@ func SetFinalizer(obj interface{}, finalizer interface{}) {
 	}
 
 	// find the containing object
-	_, base, _ := findObject(e.data)
+	base, _, _ := findObject(uintptr(e.data), 0, 0)
 
-	if base == nil {
+	if base == 0 {
 		// 0-length objects are okay.
 		if e.data == unsafe.Pointer(&zerobase) {
 			return
@@ -353,10 +358,10 @@ func SetFinalizer(obj interface{}, finalizer interface{}) {
 		throw("runtime.SetFinalizer: pointer not in allocated block")
 	}
 
-	if e.data != base {
+	if uintptr(e.data) != base {
 		// As an implementation detail we allow to set finalizers for an inner byte
 		// of an object if it could come from tiny alloc (see mallocgc for details).
-		if ot.elem == nil || ot.elem.kind&kindNoPointers == 0 || ot.elem.size >= maxTinySize {
+		if ot.elem == nil || ot.elem.ptrdata != 0 || ot.elem.size >= maxTinySize {
 			throw("runtime.SetFinalizer: pointer not at beginning of allocated block")
 		}
 	}
@@ -407,9 +412,9 @@ okarg:
 	// compute size needed for return parameters
 	nret := uintptr(0)
 	for _, t := range ft.out() {
-		nret = round(nret, uintptr(t.align)) + uintptr(t.size)
+		nret = alignUp(nret, uintptr(t.align)) + uintptr(t.size)
 	}
-	nret = round(nret, sys.PtrSize)
+	nret = alignUp(nret, sys.PtrSize)
 
 	// make sure we have a finalizer goroutine
 	createfing()
@@ -421,51 +426,7 @@ okarg:
 	})
 }
 
-// Look up pointer v in heap. Return the span containing the object,
-// the start of the object, and the size of the object. If the object
-// does not exist, return nil, nil, 0.
-func findObject(v unsafe.Pointer) (s *mspan, x unsafe.Pointer, n uintptr) {
-	c := gomcache()
-	c.local_nlookup++
-	if sys.PtrSize == 4 && c.local_nlookup >= 1<<30 {
-		// purge cache stats to prevent overflow
-		lock(&mheap_.lock)
-		purgecachedstats(c)
-		unlock(&mheap_.lock)
-	}
-
-	// find span
-	arena_start := mheap_.arena_start
-	arena_used := mheap_.arena_used
-	if uintptr(v) < arena_start || uintptr(v) >= arena_used {
-		return
-	}
-	p := uintptr(v) >> pageShift
-	q := p - arena_start>>pageShift
-	s = mheap_.spans[q]
-	if s == nil {
-		return
-	}
-	x = unsafe.Pointer(s.base())
-
-	if uintptr(v) < uintptr(x) || uintptr(v) >= uintptr(unsafe.Pointer(s.limit)) || s.state != mSpanInUse {
-		s = nil
-		x = nil
-		return
-	}
-
-	n = s.elemsize
-	if s.spanclass.sizeclass() != 0 {
-		x = add(x, (uintptr(v)-uintptr(x))/n*n)
-	}
-	return
-}
-
-// Mark KeepAlive as noinline so that the current compiler will ensure
-// that the argument is alive at the point of the function call.
-// If it were inlined, it would disappear, and there would be nothing
-// keeping the argument alive. Perhaps a future compiler will recognize
-// runtime.KeepAlive specially and do something more efficient.
+// Mark KeepAlive as noinline so that it is easily detectable as an intrinsic.
 //go:noinline
 
 // KeepAlive marks its argument as currently reachable.
@@ -487,4 +448,11 @@ func findObject(v unsafe.Pointer) (s *mspan, x unsafe.Pointer, n uintptr) {
 // Without the KeepAlive call, the finalizer could run at the start of
 // syscall.Read, closing the file descriptor before syscall.Read makes
 // the actual system call.
-func KeepAlive(interface{}) {}
+func KeepAlive(x interface{}) {
+	// Introduce a use of x that the compiler can't eliminate.
+	// This makes sure x is alive on entry. We need x to be alive
+	// on entry for "defer runtime.KeepAlive(x)"; see issue 21402.
+	if cgoAlwaysFalse {
+		println(x)
+	}
+}
