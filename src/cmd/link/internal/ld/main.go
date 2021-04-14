@@ -65,6 +65,7 @@ var (
 	flagDumpDep       = flag.Bool("dumpdep", false, "dump symbol dependency graph")
 	flagRace          = flag.Bool("race", false, "enable race detector")
 	flagMsan          = flag.Bool("msan", false, "enable MSan interface")
+	flagAslr          = flag.Bool("aslr", true, "enable ASLR for buildmode=c-shared on windows")
 
 	flagFieldTrack = flag.String("k", "", "set field tracking `symbol`")
 	flagLibGCC     = flag.String("libgcc", "", "compiler support lib for internal linking; use \"none\" to disable")
@@ -91,11 +92,10 @@ var (
 	FlagRound         = flag.Int("R", -1, "set address rounding `quantum`")
 	FlagTextAddr      = flag.Int64("T", -1, "set text segment `address`")
 	flagEntrySymbol   = flag.String("E", "", "set `entry` symbol name")
-
-	cpuprofile     = flag.String("cpuprofile", "", "write cpu profile to `file`")
-	memprofile     = flag.String("memprofile", "", "write memory profile to `file`")
-	memprofilerate = flag.Int64("memprofilerate", 0, "set runtime.MemProfileRate to `rate`")
-
+	cpuprofile        = flag.String("cpuprofile", "", "write cpu profile to `file`")
+	memprofile        = flag.String("memprofile", "", "write memory profile to `file`")
+	memprofilerate    = flag.Int64("memprofilerate", 0, "set runtime.MemProfileRate to `rate`")
+	flagAbiWrap       = flag.Bool("abiwrap", objabi.Regabi_enabled != 0, "support ABI wrapper functions")
 	benchmarkFlag     = flag.String("benchmark", "", "set to 'mem' or 'cpu' to enable phase benchmarking")
 	benchmarkFileFlag = flag.String("benchmarkprofile", "", "emit phase profiles to `base`_phase.{cpu,mem}prof")
 )
@@ -116,7 +116,7 @@ func Main(arch *sys.Arch, theArch Arch) {
 	}
 
 	final := gorootFinal()
-	addstrdata1(ctxt, "runtime/internal/sys.DefaultGoroot="+final)
+	addstrdata1(ctxt, "runtime.defaultGOROOT="+final)
 	addstrdata1(ctxt, "cmd/internal/objabi.defaultGOROOT="+final)
 
 	// TODO(matloob): define these above and then check flag values here
@@ -157,11 +157,16 @@ func Main(arch *sys.Arch, theArch Arch) {
 		ctxt.HeadType.Set(objabi.GOOS)
 	}
 
+	if !*flagAslr && ctxt.BuildMode != BuildModeCShared {
+		Errorf(nil, "-aslr=false is only allowed for -buildmode=c-shared")
+		usage()
+	}
+
 	checkStrictDups = *FlagStrictDups
 
 	startProfile()
 	if ctxt.BuildMode == BuildModeUnset {
-		ctxt.BuildMode = BuildModeExe
+		ctxt.BuildMode.Set("exe")
 	}
 
 	if ctxt.BuildMode != BuildModeShared && flag.NArg() != 1 {
@@ -176,6 +181,14 @@ func Main(arch *sys.Arch, theArch Arch) {
 	}
 
 	interpreter = *flagInterpreter
+
+	if *flagBuildid == "" && ctxt.Target.IsOpenbsd() {
+		// TODO(jsing): Remove once direct syscalls are no longer in use.
+		// OpenBSD 6.7 onwards will not permit direct syscalls from a
+		// dynamically linked binary unless it identifies the binary
+		// contains a .note.go.buildid ELF note. See issue #36435.
+		*flagBuildid = "go-openbsd"
+	}
 
 	// enable benchmarking
 	var bench *benchmark.Metrics
@@ -323,10 +336,16 @@ func Main(arch *sys.Arch, theArch Arch) {
 	// will be applied directly there.
 	bench.Start("Asmb")
 	asmb(ctxt)
-	// Generate large symbols.
-	for s, f := range ctxt.generatorSyms {
-		f(ctxt, s)
+
+	exitIfErrors()
+
+	// Generate additional symbols for the native symbol table just prior
+	// to code generation.
+	bench.Start("GenSymsLate")
+	if thearch.GenSymsLate != nil {
+		thearch.GenSymsLate(ctxt, ctxt.loader)
 	}
+
 	bench.Start("Asmb2")
 	asmb2(ctxt)
 

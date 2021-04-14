@@ -1,0 +1,220 @@
+# TODO(jayconrod): support shared memory on more platforms.
+[!darwin] [!linux] [!windows] skip
+
+# Test basic fuzzing mutator behavior.
+#
+# fuzz_test.go has two fuzz targets (FuzzA, FuzzB) which both add a seed value.
+# Each fuzz function writes the input to a log file. The coordinator and worker
+# use separate log files. check_logs.go verifies that the coordinator only
+# tests seed values and the worker tests mutated values on the fuzz target.
+
+[short] skip
+
+go test -fuzz=FuzzA -fuzztime=5s -parallel=1 -log=fuzz
+go run check_logs.go fuzz fuzz.worker
+
+# Test that the mutator is good enough to find several unique mutations.
+! go test -fuzz=FuzzMutator -parallel=1 -fuzztime=30s mutator_test.go
+! stdout '^ok'
+stdout FAIL
+stdout 'mutator found enough unique mutations'
+
+# Test that minimization is working.
+! go test -fuzz=FuzzMinimizer -run=FuzzMinimizer -parallel=1 -fuzztime=5s minimizer_test.go
+! stdout ok
+# TODO(jayconrod,katiehockman): Once logging is fixed, add this test in.
+# stdout 'got the minimum size!'
+stdout FAIL
+
+# Test that re-running the minimized value causes a crash.
+! go test -run=FuzzMinimizer minimizer_test.go
+
+-- go.mod --
+module m
+
+go 1.16
+-- fuzz_test.go --
+package fuzz_test
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"testing"
+)
+
+var (
+	logPath = flag.String("log", "", "path to log file")
+	logFile *os.File
+)
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	var err error
+	logFile, err = os.OpenFile(*logPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+	if os.IsExist(err) {
+		*logPath += ".worker"
+		logFile, err = os.OpenFile(*logPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
+func FuzzA(f *testing.F) {
+	f.Add([]byte("seed"))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		fmt.Fprintf(logFile, "FuzzA %q\n", b)
+	})
+}
+
+func FuzzB(f *testing.F) {
+	f.Add([]byte("seed"))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		fmt.Fprintf(logFile, "FuzzB %q\n", b)
+	})
+}
+
+-- minimizer_test.go --
+package fuzz_test
+
+import (
+	"bytes"
+	"testing"
+)
+
+func FuzzMinimizer(f *testing.F) {
+	f.Fuzz(func(t *testing.T, b []byte) {
+		if len(b) < 100 {
+			// Make sure that b is large enough that it can be minimized
+			return
+		}
+		if len(b) == 100 {
+			t.Logf("got the minimum size!")
+		}
+		if bytes.ContainsAny(b, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+			// Given the randomness of the mutations, this should allow the
+			// minimizer to trim down the value quite a bit.
+			t.Errorf("contains a letter")
+		}
+	})
+}
+
+-- check_logs.go --
+// +build ignore
+
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+func main() {
+	coordPath, workerPath := os.Args[1], os.Args[2]
+
+	coordLog, err := os.Open(coordPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer coordLog.Close()
+	if err := checkCoordLog(coordLog); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	workerLog, err := os.Open(workerPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer workerLog.Close()
+	if err := checkWorkerLog(workerLog); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func checkCoordLog(r io.Reader) error {
+	scan := bufio.NewScanner(r)
+	var sawASeed, sawBSeed bool
+	for scan.Scan() {
+		line := scan.Text()
+		switch {
+		case line == `FuzzA "seed"`:
+			if sawASeed {
+				return fmt.Errorf("coordinator: tested FuzzA seed multiple times")
+			}
+			sawASeed = true
+
+		case line == `FuzzB "seed"`:
+			if sawBSeed {
+				return fmt.Errorf("coordinator: tested FuzzB seed multiple times")
+			}
+			sawBSeed = true
+
+		default:
+			return fmt.Errorf("coordinator: tested something other than seeds: %s", line)
+		}
+	}
+	if err := scan.Err(); err != nil {
+		return err
+	}
+	if !sawASeed {
+		return fmt.Errorf("coordinator: did not test FuzzA seed")
+	}
+	if !sawBSeed {
+		return fmt.Errorf("coordinator: did not test FuzzB seed")
+	}
+	return nil
+}
+
+func checkWorkerLog(r io.Reader) error {
+	scan := bufio.NewScanner(r)
+	var sawAMutant bool
+	for scan.Scan() {
+		line := scan.Text()
+		if !strings.HasPrefix(line, "FuzzA ") {
+			return fmt.Errorf("worker: tested something other than target: %s", line)
+		}
+		if strings.TrimPrefix(line, "FuzzA ") != `"seed"` {
+			sawAMutant = true
+		}
+	}
+	if err := scan.Err(); err != nil && err != bufio.ErrTooLong {
+		return err
+	}
+	if !sawAMutant {
+		return fmt.Errorf("worker: did not test any mutants")
+	}
+	return nil
+}
+
+-- mutator_test.go --
+package fuzz_test
+
+import (
+	"testing"
+)
+
+// TODO(katiehockman): re-work this test once we have a better fuzzing engine
+// (ie. more mutations, and compiler instrumentation)
+func FuzzMutator(f *testing.F) {
+	// TODO(katiehockman): simplify this once we can dedupe crashes (e.g.
+	// replace map with calls to panic, and simply count the number of crashes
+	// that were added to testdata)
+	crashes := make(map[string]bool)
+	// No seed corpus initiated
+	f.Fuzz(func(t *testing.T, b []byte) {
+		crashes[string(b)] = true
+		if len(crashes) >= 1000 {
+			panic("mutator found enough unique mutations")
+		}
+	})
+}

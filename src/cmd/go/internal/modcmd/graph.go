@@ -13,7 +13,6 @@ import (
 	"sort"
 
 	"cmd/go/internal/base"
-	"cmd/go/internal/cfg"
 	"cmd/go/internal/modload"
 
 	"golang.org/x/mod/module"
@@ -27,6 +26,8 @@ Graph prints the module requirement graph (with replacements applied)
 in text form. Each line in the output has two space-separated fields: a module
 and one of its requirements. Each module is identified as a string of the form
 path@version, except for the main module, which has no @version suffix.
+
+See https://golang.org/ref/mod#go-mod-graph for more about 'go mod graph'.
 	`,
 	Run: runGraph,
 }
@@ -39,14 +40,8 @@ func runGraph(ctx context.Context, cmd *base.Command, args []string) {
 	if len(args) > 0 {
 		base.Fatalf("go mod graph: graph takes no arguments")
 	}
-	// Checks go mod expected behavior
-	if !modload.Enabled() {
-		if cfg.Getenv("GO111MODULE") == "off" {
-			base.Fatalf("go: modules disabled by GO111MODULE=off; see 'go help modules'")
-		} else {
-			base.Fatalf("go: cannot find main module; see 'go help modules'")
-		}
-	}
+	modload.ForceUseModules = true
+	modload.RootMode = modload.NeedRoot
 	modload.LoadAllModules(ctx)
 
 	reqs := modload.MinReqs()

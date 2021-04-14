@@ -5,6 +5,7 @@
 package ssa
 
 import (
+	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
 	"cmd/internal/src"
 	"fmt"
@@ -36,7 +37,7 @@ type Value struct {
 	// Users of AuxInt which interpret AuxInt as unsigned (e.g. shifts) must be careful.
 	// Use Value.AuxUnsigned to get the zero-extended value of AuxInt.
 	AuxInt int64
-	Aux    interface{}
+	Aux    Aux
 
 	// Arguments of this value
 	Args []*Value
@@ -193,11 +194,11 @@ func (v *Value) auxString() string {
 		return fmt.Sprintf(" [%g]", v.AuxFloat())
 	case auxString:
 		return fmt.Sprintf(" {%q}", v.Aux)
-	case auxSym, auxTyp:
+	case auxSym, auxCall, auxTyp:
 		if v.Aux != nil {
 			return fmt.Sprintf(" {%v}", v.Aux)
 		}
-	case auxSymOff, auxTypSize:
+	case auxSymOff, auxCallOff, auxTypSize:
 		s := ""
 		if v.Aux != nil {
 			s = fmt.Sprintf(" {%v}", v.Aux)
@@ -348,6 +349,9 @@ func (v *Value) reset(op Op) {
 // It modifies v to be (Copy a).
 //go:noinline
 func (v *Value) copyOf(a *Value) {
+	if v == a {
+		return
+	}
 	if v.InCache {
 		v.Block.Func.unCache(v)
 	}
@@ -488,4 +492,17 @@ func (v *Value) removeable() bool {
 		return false
 	}
 	return true
+}
+
+// TODO(mdempsky): Shouldn't be necessary; see discussion at golang.org/cl/275756
+func (*Value) CanBeAnSSAAux() {}
+
+// AutoVar returns a *Name and int64 representing the auto variable and offset within it
+// where v should be spilled.
+func AutoVar(v *Value) (*ir.Name, int64) {
+	loc := v.Block.Func.RegAlloc[v.ID].(LocalSlot)
+	if v.Type.Size() > loc.Type.Size() {
+		v.Fatalf("spill/restore type %s doesn't fit in slot type %s", v.Type, loc.Type)
+	}
+	return loc.N, loc.Off
 }

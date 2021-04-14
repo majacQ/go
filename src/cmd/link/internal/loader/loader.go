@@ -63,6 +63,7 @@ type Reloc struct {
 func (rel Reloc) Type() objabi.RelocType { return objabi.RelocType(rel.Reloc.Type()) + rel.typ }
 func (rel Reloc) Sym() Sym               { return rel.l.resolve(rel.r, rel.Reloc.Sym()) }
 func (rel Reloc) SetSym(s Sym)           { rel.Reloc.SetSym(goobj.SymRef{PkgIdx: 0, SymIdx: uint32(s)}) }
+func (rel Reloc) IsMarker() bool         { return rel.Siz() == 0 }
 
 func (rel Reloc) SetType(t objabi.RelocType) {
 	if t != objabi.RelocType(uint8(t)) {
@@ -240,7 +241,6 @@ type Loader struct {
 	attrExternal         Bitmap // external symbols, indexed by ext sym index
 
 	attrReadOnly         map[Sym]bool     // readonly data for this sym
-	attrTopFrame         map[Sym]struct{} // top frame symbols
 	attrSpecial          map[Sym]struct{} // "special" frame symbols
 	attrCgoExportDynamic map[Sym]struct{} // "cgo_export_dynamic" symbols
 	attrCgoExportStatic  map[Sym]struct{} // "cgo_export_static" symbols
@@ -321,6 +321,7 @@ type extSymPayload struct {
 const (
 	// Loader.flags
 	FlagStrictDups = 1 << iota
+	FlagUseABIAlias
 )
 
 func NewLoader(flags uint32, elfsetstring elfsetstringFunc, reporter *ErrorReporter) *Loader {
@@ -329,7 +330,7 @@ func NewLoader(flags uint32, elfsetstring elfsetstringFunc, reporter *ErrorRepor
 	ldr := &Loader{
 		start:                make(map[*oReader]Sym),
 		objs:                 []objIdx{{}, {extReader, 0}}, // reserve index 0 for nil symbol, 1 for external symbols
-		objSyms:              make([]objSym, 1, 100000),    // reserve index 0 for nil symbol
+		objSyms:              make([]objSym, 1, 1),         // This will get overwritten later.
 		extReader:            extReader,
 		symsByName:           [2]map[string]Sym{make(map[string]Sym, 80000), make(map[string]Sym, 50000)}, // preallocate ~2MB for ABI0 and ~1MB for ABI1 symbols
 		objByPkg:             make(map[string]uint32),
@@ -347,7 +348,6 @@ func NewLoader(flags uint32, elfsetstring elfsetstringFunc, reporter *ErrorRepor
 		plt:                  make(map[Sym]int32),
 		got:                  make(map[Sym]int32),
 		dynid:                make(map[Sym]int32),
-		attrTopFrame:         make(map[Sym]struct{}),
 		attrSpecial:          make(map[Sym]struct{}),
 		attrCgoExportDynamic: make(map[Sym]struct{}),
 		attrCgoExportStatic:  make(map[Sym]struct{}),
@@ -632,13 +632,40 @@ func (l *Loader) resolve(r *oReader, s goobj.SymRef) Sym {
 		i := int(s.SymIdx) + r.ndef + r.nhashed64def + r.nhasheddef
 		return r.syms[i]
 	case goobj.PkgIdxBuiltin:
-		return l.builtinSyms[s.SymIdx]
+		if bi := l.builtinSyms[s.SymIdx]; bi != 0 {
+			return bi
+		}
+		l.reportMissingBuiltin(int(s.SymIdx), r.unit.Lib.Pkg)
+		return 0
 	case goobj.PkgIdxSelf:
 		rr = r
 	default:
 		rr = l.objs[r.pkg[p]].r
 	}
 	return l.toGlobal(rr, s.SymIdx)
+}
+
+// reportMissingBuiltin issues an error in the case where we have a
+// relocation against a runtime builtin whose definition is not found
+// when the runtime package is built. The canonical example is
+// "runtime.racefuncenter" -- currently if you do something like
+//
+//    go build -gcflags=-race myprogram.go
+//
+// the compiler will insert calls to the builtin runtime.racefuncenter,
+// but the version of the runtime used for linkage won't actually contain
+// definitions of that symbol. See issue #42396 for details.
+//
+// As currently implemented, this is a fatal error. This has drawbacks
+// in that if there are multiple missing builtins, the error will only
+// cite the first one. On the plus side, terminating the link here has
+// advantages in that we won't run the risk of panics or crashes later
+// on in the linker due to R_CALL relocations with 0-valued target
+// symbols.
+func (l *Loader) reportMissingBuiltin(bsym int, reflib string) {
+	bname, _ := goobj.BuiltinName(bsym)
+	log.Fatalf("reference to undefined builtin %q from package %q",
+		bname, reflib)
 }
 
 // Look up a symbol by name, return global index, or 0 if not found.
@@ -977,24 +1004,6 @@ func (l *Loader) SetAttrExternal(i Sym, v bool) {
 		l.attrExternal.Set(l.extIndex(i))
 	} else {
 		l.attrExternal.Unset(l.extIndex(i))
-	}
-}
-
-// AttrTopFrame returns true for a function symbol that is an entry
-// point, meaning that unwinders should stop when they hit this
-// function.
-func (l *Loader) AttrTopFrame(i Sym) bool {
-	_, ok := l.attrTopFrame[i]
-	return ok
-}
-
-// SetAttrTopFrame sets the "top frame" property for a symbol (see
-// AttrTopFrame).
-func (l *Loader) SetAttrTopFrame(i Sym, v bool) {
-	if v {
-		l.attrTopFrame[i] = struct{}{}
-	} else {
-		delete(l.attrTopFrame, i)
 	}
 }
 
@@ -1790,6 +1799,11 @@ func (l *Loader) SortSub(s Sym) Sym {
 	return sl[0].s
 }
 
+// SortSyms sorts a list of symbols by their value.
+func (l *Loader) SortSyms(ss []Sym) {
+	sort.SliceStable(ss, func(i, j int) bool { return l.SymValue(ss[i]) < l.SymValue(ss[j]) })
+}
+
 // Insure that reachable bitmap and its siblings have enough size.
 func (l *Loader) growAttrBitmaps(reqLen int) {
 	if reqLen > l.attrReachable.Len() {
@@ -1871,22 +1885,31 @@ func (fi *FuncInfo) Locals() int {
 }
 
 func (fi *FuncInfo) FuncID() objabi.FuncID {
-	return objabi.FuncID((*goobj.FuncInfo)(nil).ReadFuncID(fi.data))
+	return (*goobj.FuncInfo)(nil).ReadFuncID(fi.data)
 }
 
-func (fi *FuncInfo) Pcsp() []byte {
-	pcsp, end := (*goobj.FuncInfo)(nil).ReadPcsp(fi.data)
-	return fi.r.BytesAt(fi.r.PcdataBase()+pcsp, int(end-pcsp))
+func (fi *FuncInfo) FuncFlag() objabi.FuncFlag {
+	return (*goobj.FuncInfo)(nil).ReadFuncFlag(fi.data)
 }
 
-func (fi *FuncInfo) Pcfile() []byte {
-	pcf, end := (*goobj.FuncInfo)(nil).ReadPcfile(fi.data)
-	return fi.r.BytesAt(fi.r.PcdataBase()+pcf, int(end-pcf))
+func (fi *FuncInfo) Pcsp() Sym {
+	sym := (*goobj.FuncInfo)(nil).ReadPcsp(fi.data)
+	return fi.l.resolve(fi.r, sym)
 }
 
-func (fi *FuncInfo) Pcline() []byte {
-	pcln, end := (*goobj.FuncInfo)(nil).ReadPcline(fi.data)
-	return fi.r.BytesAt(fi.r.PcdataBase()+pcln, int(end-pcln))
+func (fi *FuncInfo) Pcfile() Sym {
+	sym := (*goobj.FuncInfo)(nil).ReadPcfile(fi.data)
+	return fi.l.resolve(fi.r, sym)
+}
+
+func (fi *FuncInfo) Pcline() Sym {
+	sym := (*goobj.FuncInfo)(nil).ReadPcline(fi.data)
+	return fi.l.resolve(fi.r, sym)
+}
+
+func (fi *FuncInfo) Pcinline() Sym {
+	sym := (*goobj.FuncInfo)(nil).ReadPcinline(fi.data)
+	return fi.l.resolve(fi.r, sym)
 }
 
 // Preload has to be called prior to invoking the various methods
@@ -1895,27 +1918,16 @@ func (fi *FuncInfo) Preload() {
 	fi.lengths = (*goobj.FuncInfo)(nil).ReadFuncInfoLengths(fi.data)
 }
 
-func (fi *FuncInfo) Pcinline() []byte {
+func (fi *FuncInfo) Pcdata() []Sym {
 	if !fi.lengths.Initialized {
 		panic("need to call Preload first")
 	}
-	pcinl, end := (*goobj.FuncInfo)(nil).ReadPcinline(fi.data, fi.lengths.PcdataOff)
-	return fi.r.BytesAt(fi.r.PcdataBase()+pcinl, int(end-pcinl))
-}
-
-func (fi *FuncInfo) NumPcdata() uint32 {
-	if !fi.lengths.Initialized {
-		panic("need to call Preload first")
+	syms := (*goobj.FuncInfo)(nil).ReadPcdata(fi.data)
+	ret := make([]Sym, len(syms))
+	for i := range ret {
+		ret[i] = fi.l.resolve(fi.r, syms[i])
 	}
-	return fi.lengths.NumPcdata
-}
-
-func (fi *FuncInfo) Pcdata(k int) []byte {
-	if !fi.lengths.Initialized {
-		panic("need to call Preload first")
-	}
-	pcdat, end := (*goobj.FuncInfo)(nil).ReadPcdata(fi.data, fi.lengths.PcdataOff, uint32(k))
-	return fi.r.BytesAt(fi.r.PcdataBase()+pcdat, int(end-pcdat))
+	return ret
 }
 
 func (fi *FuncInfo) NumFuncdataoff() uint32 {
@@ -1962,6 +1974,13 @@ func (fi *FuncInfo) File(k int) goobj.CUFileIndex {
 		panic("need to call Preload first")
 	}
 	return (*goobj.FuncInfo)(nil).ReadFile(fi.data, fi.lengths.FileOff, uint32(k))
+}
+
+// TopFrame returns true if the function associated with this FuncInfo
+// is an entry point, meaning that unwinders should stop when they hit
+// this function.
+func (fi *FuncInfo) TopFrame() bool {
+	return (fi.FuncFlag() & objabi.FuncFlag_TOPFRAME) != 0
 }
 
 type InlTreeNode struct {
@@ -2018,8 +2037,9 @@ func (l *Loader) FuncInfo(i Sym) FuncInfo {
 	return FuncInfo{}
 }
 
-// Preload a package: add autolibs, add defined package symbols to the symbol table.
-// Does not add non-package symbols yet, which will be done in LoadNonpkgSyms.
+// Preload a package: adds autolib.
+// Does not add defined package or non-packaged symbols to the symbol table.
+// These are done in LoadSyms.
 // Does not read symbol data.
 // Returns the fingerprint of the object.
 func (l *Loader) Preload(localSymVersion int, f *bio.Reader, lib *sym.Library, unit *sym.CompilationUnit, length int64) goobj.FingerprintType {
@@ -2062,8 +2082,6 @@ func (l *Loader) Preload(localSymVersion int, f *bio.Reader, lib *sym.Library, u
 	}
 
 	l.addObj(lib.Pkg, or)
-	st := loadState{l: l}
-	st.preloadSyms(or, pkgDef)
 
 	// The caller expects us consuming all the data
 	f.MustSeek(length, os.SEEK_CUR)
@@ -2124,9 +2142,6 @@ func (st *loadState) preloadSyms(r *oReader, kind int) {
 		}
 		gi := st.addSym(name, v, r, i, kind, osym)
 		r.syms[i] = gi
-		if osym.TopFrame() {
-			l.SetAttrTopFrame(gi, true)
-		}
 		if osym.Local() {
 			l.SetAttrLocal(gi, true)
 		}
@@ -2146,17 +2161,30 @@ func (st *loadState) preloadSyms(r *oReader, kind int) {
 	}
 }
 
-// Add hashed (content-addressable) symbols, non-package symbols, and
+// Add syms, hashed (content-addressable) symbols, non-package symbols, and
 // references to external symbols (which are always named).
-func (l *Loader) LoadNonpkgSyms(arch *sys.Arch) {
+func (l *Loader) LoadSyms(arch *sys.Arch) {
+	// Allocate space for symbols, making a guess as to how much space we need.
+	// This function was determined empirically by looking at the cmd/compile on
+	// Darwin, and picking factors for hashed and hashed64 syms.
+	var symSize, hashedSize, hashed64Size int
+	for _, o := range l.objs[goObjStart:] {
+		symSize += o.r.ndef + o.r.nhasheddef/2 + o.r.nhashed64def/2 + o.r.NNonpkgdef()
+		hashedSize += o.r.nhasheddef / 2
+		hashed64Size += o.r.nhashed64def / 2
+	}
+	// Index 0 is invalid for symbols.
+	l.objSyms = make([]objSym, 1, symSize)
+
 	l.npkgsyms = l.NSym()
-	// Preallocate some space (a few hundreds KB) for some symbols.
-	// As of Go 1.15, linking cmd/compile has ~8000 hashed64 symbols and
-	// ~13000 hashed symbols.
 	st := loadState{
 		l:            l,
-		hashed64Syms: make(map[uint64]symAndSize, 10000),
-		hashedSyms:   make(map[goobj.HashType]symAndSize, 15000),
+		hashed64Syms: make(map[uint64]symAndSize, hashed64Size),
+		hashedSyms:   make(map[goobj.HashType]symAndSize, hashedSize),
+	}
+
+	for _, o := range l.objs[goObjStart:] {
+		st.preloadSyms(o.r, pkgDef)
 	}
 	for _, o := range l.objs[goObjStart:] {
 		st.preloadSyms(o.r, hashed64Def)
@@ -2231,6 +2259,9 @@ func abiToVer(abi uint16, localSymVersion int) int {
 // symbol. If the sym in question is not an alias, the sym itself is
 // returned.
 func (l *Loader) ResolveABIAlias(s Sym) Sym {
+	if l.flags&FlagUseABIAlias == 0 {
+		return s
+	}
 	if s == 0 {
 		return 0
 	}
@@ -2368,7 +2399,6 @@ func (l *Loader) CopyAttributes(src Sym, dst Sym) {
 		// when copying attributes from a dupOK ABI wrapper symbol to
 		// the real target symbol (which may not be marked dupOK).
 	}
-	l.SetAttrTopFrame(dst, l.AttrTopFrame(src))
 	l.SetAttrSpecial(dst, l.AttrSpecial(src))
 	l.SetAttrCgoExportDynamic(dst, l.AttrCgoExportDynamic(src))
 	l.SetAttrCgoExportStatic(dst, l.AttrCgoExportStatic(src))
@@ -2610,11 +2640,15 @@ func (l *Loader) Dump() {
 	fmt.Println("Nsyms:", len(l.objSyms))
 	fmt.Println("syms")
 	for i := Sym(1); i < Sym(len(l.objSyms)); i++ {
-		pi := interface{}("")
+		pi := ""
 		if l.IsExternal(i) {
 			pi = fmt.Sprintf("<ext %d>", l.extIndex(i))
 		}
-		fmt.Println(i, l.SymName(i), l.SymType(i), pi)
+		sect := ""
+		if l.SymSect(i) != nil {
+			sect = l.SymSect(i).Name
+		}
+		fmt.Printf("%v %v %v %v %x %v\n", i, l.SymName(i), l.SymType(i), pi, l.SymValue(i), sect)
 	}
 	fmt.Println("symsByName")
 	for name, i := range l.symsByName[0] {

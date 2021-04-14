@@ -19,16 +19,16 @@ type CUFileIndex uint32
 //
 // TODO: make each pcdata a separate symbol?
 type FuncInfo struct {
-	Args   uint32
-	Locals uint32
-	FuncID objabi.FuncID
+	Args     uint32
+	Locals   uint32
+	FuncID   objabi.FuncID
+	FuncFlag objabi.FuncFlag
 
-	Pcsp        uint32
-	Pcfile      uint32
-	Pcline      uint32
-	Pcinline    uint32
-	Pcdata      []uint32
-	PcdataEnd   uint32
+	Pcsp        SymRef
+	Pcfile      SymRef
+	Pcline      SymRef
+	Pcinline    SymRef
+	Pcdata      []SymRef
 	Funcdataoff []uint32
 	File        []CUFileIndex
 
@@ -36,25 +36,34 @@ type FuncInfo struct {
 }
 
 func (a *FuncInfo) Write(w *bytes.Buffer) {
+	writeUint8 := func(x uint8) {
+		w.WriteByte(x)
+	}
 	var b [4]byte
 	writeUint32 := func(x uint32) {
 		binary.LittleEndian.PutUint32(b[:], x)
 		w.Write(b[:])
 	}
+	writeSymRef := func(s SymRef) {
+		writeUint32(s.PkgIdx)
+		writeUint32(s.SymIdx)
+	}
 
 	writeUint32(a.Args)
 	writeUint32(a.Locals)
-	writeUint32(uint32(a.FuncID))
-
-	writeUint32(a.Pcsp)
-	writeUint32(a.Pcfile)
-	writeUint32(a.Pcline)
-	writeUint32(a.Pcinline)
+	writeUint8(uint8(a.FuncID))
+	writeUint8(uint8(a.FuncFlag))
+	writeUint8(0) // pad to uint32 boundary
+	writeUint8(0)
+	writeSymRef(a.Pcsp)
+	writeSymRef(a.Pcfile)
+	writeSymRef(a.Pcline)
+	writeSymRef(a.Pcinline)
 	writeUint32(uint32(len(a.Pcdata)))
-	for _, x := range a.Pcdata {
-		writeUint32(x)
+	for _, sym := range a.Pcdata {
+		writeSymRef(sym)
 	}
-	writeUint32(a.PcdataEnd)
+
 	writeUint32(uint32(len(a.Funcdataoff)))
 	for _, x := range a.Funcdataoff {
 		writeUint32(x)
@@ -66,44 +75,6 @@ func (a *FuncInfo) Write(w *bytes.Buffer) {
 	writeUint32(uint32(len(a.InlTree)))
 	for i := range a.InlTree {
 		a.InlTree[i].Write(w)
-	}
-}
-
-func (a *FuncInfo) Read(b []byte) {
-	readUint32 := func() uint32 {
-		x := binary.LittleEndian.Uint32(b)
-		b = b[4:]
-		return x
-	}
-
-	a.Args = readUint32()
-	a.Locals = readUint32()
-	a.FuncID = objabi.FuncID(readUint32())
-
-	a.Pcsp = readUint32()
-	a.Pcfile = readUint32()
-	a.Pcline = readUint32()
-	a.Pcinline = readUint32()
-	pcdatalen := readUint32()
-	a.Pcdata = make([]uint32, pcdatalen)
-	for i := range a.Pcdata {
-		a.Pcdata[i] = readUint32()
-	}
-	a.PcdataEnd = readUint32()
-	funcdataofflen := readUint32()
-	a.Funcdataoff = make([]uint32, funcdataofflen)
-	for i := range a.Funcdataoff {
-		a.Funcdataoff[i] = readUint32()
-	}
-	filelen := readUint32()
-	a.File = make([]CUFileIndex, filelen)
-	for i := range a.File {
-		a.File[i] = CUFileIndex(readUint32())
-	}
-	inltreelen := readUint32()
-	a.InlTree = make([]InlTreeNode, inltreelen)
-	for i := range a.InlTree {
-		b = a.InlTree[i].Read(b)
 	}
 }
 
@@ -127,11 +98,13 @@ type FuncInfoLengths struct {
 func (*FuncInfo) ReadFuncInfoLengths(b []byte) FuncInfoLengths {
 	var result FuncInfoLengths
 
-	const numpcdataOff = 28
+	// Offset to the number of pcdata values. This value is determined by counting
+	// the number of bytes until we write pcdata to the file.
+	const numpcdataOff = 44
 	result.NumPcdata = binary.LittleEndian.Uint32(b[numpcdataOff:])
 	result.PcdataOff = numpcdataOff + 4
 
-	numfuncdataoffOff := result.PcdataOff + 4*(result.NumPcdata+1)
+	numfuncdataoffOff := result.PcdataOff + 8*result.NumPcdata
 	result.NumFuncdataoff = binary.LittleEndian.Uint32(b[numfuncdataoffOff:])
 	result.FuncdataoffOff = numfuncdataoffOff + 4
 
@@ -152,31 +125,32 @@ func (*FuncInfo) ReadArgs(b []byte) uint32 { return binary.LittleEndian.Uint32(b
 
 func (*FuncInfo) ReadLocals(b []byte) uint32 { return binary.LittleEndian.Uint32(b[4:]) }
 
-func (*FuncInfo) ReadFuncID(b []byte) uint32 { return binary.LittleEndian.Uint32(b[8:]) }
+func (*FuncInfo) ReadFuncID(b []byte) objabi.FuncID { return objabi.FuncID(b[8]) }
 
-// return start and end offsets.
-func (*FuncInfo) ReadPcsp(b []byte) (uint32, uint32) {
-	return binary.LittleEndian.Uint32(b[12:]), binary.LittleEndian.Uint32(b[16:])
+func (*FuncInfo) ReadFuncFlag(b []byte) objabi.FuncFlag { return objabi.FuncFlag(b[9]) }
+
+func (*FuncInfo) ReadPcsp(b []byte) SymRef {
+	return SymRef{binary.LittleEndian.Uint32(b[12:]), binary.LittleEndian.Uint32(b[16:])}
 }
 
-// return start and end offsets.
-func (*FuncInfo) ReadPcfile(b []byte) (uint32, uint32) {
-	return binary.LittleEndian.Uint32(b[16:]), binary.LittleEndian.Uint32(b[20:])
+func (*FuncInfo) ReadPcfile(b []byte) SymRef {
+	return SymRef{binary.LittleEndian.Uint32(b[20:]), binary.LittleEndian.Uint32(b[24:])}
 }
 
-// return start and end offsets.
-func (*FuncInfo) ReadPcline(b []byte) (uint32, uint32) {
-	return binary.LittleEndian.Uint32(b[20:]), binary.LittleEndian.Uint32(b[24:])
+func (*FuncInfo) ReadPcline(b []byte) SymRef {
+	return SymRef{binary.LittleEndian.Uint32(b[28:]), binary.LittleEndian.Uint32(b[32:])}
 }
 
-// return start and end offsets.
-func (*FuncInfo) ReadPcinline(b []byte, pcdataoffset uint32) (uint32, uint32) {
-	return binary.LittleEndian.Uint32(b[24:]), binary.LittleEndian.Uint32(b[pcdataoffset:])
+func (*FuncInfo) ReadPcinline(b []byte) SymRef {
+	return SymRef{binary.LittleEndian.Uint32(b[36:]), binary.LittleEndian.Uint32(b[40:])}
 }
 
-// return start and end offsets.
-func (*FuncInfo) ReadPcdata(b []byte, pcdataoffset uint32, k uint32) (uint32, uint32) {
-	return binary.LittleEndian.Uint32(b[pcdataoffset+4*k:]), binary.LittleEndian.Uint32(b[pcdataoffset+4+4*k:])
+func (*FuncInfo) ReadPcdata(b []byte) []SymRef {
+	syms := make([]SymRef, binary.LittleEndian.Uint32(b[44:]))
+	for i := range syms {
+		syms[i] = SymRef{binary.LittleEndian.Uint32(b[48+i*8:]), binary.LittleEndian.Uint32(b[52+i*8:])}
+	}
+	return syms
 }
 
 func (*FuncInfo) ReadFuncdataoff(b []byte, funcdataofffoff uint32, k uint32) int64 {

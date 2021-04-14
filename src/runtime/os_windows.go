@@ -21,6 +21,7 @@ const (
 //go:cgo_import_dynamic runtime._CreateIoCompletionPort CreateIoCompletionPort%4 "kernel32.dll"
 //go:cgo_import_dynamic runtime._CreateThread CreateThread%6 "kernel32.dll"
 //go:cgo_import_dynamic runtime._CreateWaitableTimerA CreateWaitableTimerA%3 "kernel32.dll"
+//go:cgo_import_dynamic runtime._CreateWaitableTimerExW CreateWaitableTimerExW%4 "kernel32.dll"
 //go:cgo_import_dynamic runtime._DuplicateHandle DuplicateHandle%7 "kernel32.dll"
 //go:cgo_import_dynamic runtime._ExitProcess ExitProcess%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._FreeEnvironmentStringsW FreeEnvironmentStringsW%1 "kernel32.dll"
@@ -45,6 +46,7 @@ const (
 //go:cgo_import_dynamic runtime._SetThreadPriority SetThreadPriority%2 "kernel32.dll"
 //go:cgo_import_dynamic runtime._SetUnhandledExceptionFilter SetUnhandledExceptionFilter%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._SetWaitableTimer SetWaitableTimer%6 "kernel32.dll"
+//go:cgo_import_dynamic runtime._Sleep Sleep%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._SuspendThread SuspendThread%1 "kernel32.dll"
 //go:cgo_import_dynamic runtime._SwitchToThread SwitchToThread%0 "kernel32.dll"
 //go:cgo_import_dynamic runtime._TlsAlloc TlsAlloc%0 "kernel32.dll"
@@ -68,6 +70,7 @@ var (
 	_CreateIoCompletionPort,
 	_CreateThread,
 	_CreateWaitableTimerA,
+	_CreateWaitableTimerExW,
 	_DuplicateHandle,
 	_ExitProcess,
 	_FreeEnvironmentStringsW,
@@ -95,6 +98,7 @@ var (
 	_SetThreadPriority,
 	_SetUnhandledExceptionFilter,
 	_SetWaitableTimer,
+	_Sleep,
 	_SuspendThread,
 	_SwitchToThread,
 	_TlsAlloc,
@@ -144,12 +148,17 @@ func tstart_stdcall(newm *m)
 // Called by OS using stdcall ABI.
 func ctrlhandler()
 
+// Init-time helper
+func wintls()
+
 type mOS struct {
 	threadLock mutex   // protects "thread" and prevents closing
 	thread     uintptr // thread handle
 
 	waitsema   uintptr // semaphore for parking on locks
 	resumesema uintptr // semaphore to indicate suspend/resume
+
+	highResTimer uintptr // high resolution timer handle used in usleep
 
 	// preemptExtLock synchronizes preemptM with entry/exit from
 	// external C code.
@@ -230,6 +239,8 @@ func windowsLoadSystemLib(name []byte) uintptr {
 	}
 }
 
+const haveCputicksAsm = GOARCH == "386" || GOARCH == "amd64"
+
 func loadOptionalSyscalls() {
 	var kernel32dll = []byte("kernel32.dll\000")
 	k32 := stdcall1(_LoadLibraryA, uintptr(unsafe.Pointer(&kernel32dll[0])))
@@ -256,7 +267,7 @@ func loadOptionalSyscalls() {
 	}
 	_NtWaitForSingleObject = windowsFindfunc(n32, []byte("NtWaitForSingleObject\000"))
 
-	if GOARCH == "arm" {
+	if !haveCputicksAsm {
 		_QueryPerformanceCounter = windowsFindfunc(k32, []byte("QueryPerformanceCounter\000"))
 		if _QueryPerformanceCounter == nil {
 			throw("could not find QPC syscalls")
@@ -373,7 +384,6 @@ const (
 // in sys_windows_386.s and sys_windows_amd64.s:
 func externalthreadhandler()
 func getlasterror() uint32
-func setlasterror(err uint32)
 
 // When loading DLLs, we prefer to use LoadLibraryEx with
 // LOAD_LIBRARY_SEARCH_* flags, if available. LoadLibraryEx is not
@@ -402,11 +412,21 @@ const osRelaxMinNS = 60 * 1e6
 // osRelax is called by the scheduler when transitioning to and from
 // all Ps being idle.
 //
-// On Windows, it adjusts the system-wide timer resolution. Go needs a
+// Some versions of Windows have high resolution timer. For those
+// versions osRelax is noop.
+// For Windows versions without high resolution timer, osRelax
+// adjusts the system-wide timer resolution. Go needs a
 // high resolution timer while running and there's little extra cost
 // if we're already using the CPU, but if all Ps are idle there's no
 // need to consume extra power to drive the high-res timer.
 func osRelax(relax bool) uint32 {
+	if haveHighResTimer {
+		// If the high resolution timer is available, the runtime uses the timer
+		// to sleep for short durations. This means there's no need to adjust
+		// the global clock frequency.
+		return 0
+	}
+
 	if relax {
 		return uint32(stdcall1(_timeEndPeriod, 1))
 	} else {
@@ -414,10 +434,45 @@ func osRelax(relax bool) uint32 {
 	}
 }
 
+// haveHighResTimer indicates that the CreateWaitableTimerEx
+// CREATE_WAITABLE_TIMER_HIGH_RESOLUTION flag is available.
+var haveHighResTimer = false
+
+// createHighResTimer calls CreateWaitableTimerEx with
+// CREATE_WAITABLE_TIMER_HIGH_RESOLUTION flag to create high
+// resolution timer. createHighResTimer returns new timer
+// handle or 0, if CreateWaitableTimerEx failed.
+func createHighResTimer() uintptr {
+	const (
+		// As per @jstarks, see
+		// https://github.com/golang/go/issues/8687#issuecomment-656259353
+		_CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002
+
+		_SYNCHRONIZE        = 0x00100000
+		_TIMER_QUERY_STATE  = 0x0001
+		_TIMER_MODIFY_STATE = 0x0002
+	)
+	return stdcall4(_CreateWaitableTimerExW, 0, 0,
+		_CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+		_SYNCHRONIZE|_TIMER_QUERY_STATE|_TIMER_MODIFY_STATE)
+}
+
+const highResTimerSupported = GOARCH == "386" || GOARCH == "amd64"
+
+func initHighResTimer() {
+	if !highResTimerSupported {
+		// TODO: Not yet implemented.
+		return
+	}
+	h := createHighResTimer()
+	if h != 0 {
+		haveHighResTimer = true
+		stdcall1(_CloseHandle, h)
+	}
+}
+
 func osinit() {
 	asmstdcallAddr = unsafe.Pointer(funcPC(asmstdcall))
-	usleep2Addr = unsafe.Pointer(funcPC(usleep2))
-	switchtothreadAddr = unsafe.Pointer(funcPC(switchtothread))
 
 	setBadSignalMsg()
 
@@ -429,6 +484,7 @@ func osinit() {
 
 	stdcall2(_SetConsoleCtrlHandler, funcPC(ctrlhandler), 1)
 
+	initHighResTimer()
 	timeBeginPeriodRetValue = osRelax(false)
 
 	ncpu = getproccount()
@@ -822,7 +878,7 @@ func mpreinit(mp *m) {
 }
 
 //go:nosplit
-func msigsave(mp *m) {
+func sigsave(p *sigset) {
 }
 
 //go:nosplit
@@ -835,18 +891,30 @@ func clearSignalHandlers() {
 }
 
 //go:nosplit
-func sigblock() {
+func sigblock(exiting bool) {
 }
 
 // Called to initialize a new m (including the bootstrap m).
 // Called on the new thread, cannot allocate memory.
 func minit() {
 	var thandle uintptr
-	stdcall7(_DuplicateHandle, currentProcess, currentThread, currentProcess, uintptr(unsafe.Pointer(&thandle)), 0, 0, _DUPLICATE_SAME_ACCESS)
+	if stdcall7(_DuplicateHandle, currentProcess, currentThread, currentProcess, uintptr(unsafe.Pointer(&thandle)), 0, 0, _DUPLICATE_SAME_ACCESS) == 0 {
+		print("runtime.minit: duplicatehandle failed; errno=", getlasterror(), "\n")
+		throw("runtime.minit: duplicatehandle failed")
+	}
 
 	mp := getg().m
 	lock(&mp.threadLock)
 	mp.thread = thandle
+
+	// Configure usleep timer, if possible.
+	if mp.highResTimer == 0 && haveHighResTimer {
+		mp.highResTimer = createHighResTimer()
+		if mp.highResTimer == 0 {
+			print("runtime: CreateWaitableTimerEx failed; errno=", getlasterror(), "\n")
+			throw("CreateWaitableTimerEx when creating timer failed")
+		}
+	}
 	unlock(&mp.threadLock)
 
 	// Query the true stack base from the OS. Currently we're
@@ -882,9 +950,29 @@ func minit() {
 func unminit() {
 	mp := getg().m
 	lock(&mp.threadLock)
-	stdcall1(_CloseHandle, mp.thread)
-	mp.thread = 0
+	if mp.thread != 0 {
+		stdcall1(_CloseHandle, mp.thread)
+		mp.thread = 0
+	}
 	unlock(&mp.threadLock)
+}
+
+// Called from exitm, but not from drop, to undo the effect of thread-owned
+// resources in minit, semacreate, or elsewhere. Do not take locks after calling this.
+//go:nosplit
+func mdestroy(mp *m) {
+	if mp.highResTimer != 0 {
+		stdcall1(_CloseHandle, mp.highResTimer)
+		mp.highResTimer = 0
+	}
+	if mp.waitsema != 0 {
+		stdcall1(_CloseHandle, mp.waitsema)
+		mp.waitsema = 0
+	}
+	if mp.resumesema != 0 {
+		stdcall1(_CloseHandle, mp.resumesema)
+		mp.resumesema = 0
+	}
 }
 
 // Calling stdcall on os stack.
@@ -976,23 +1064,39 @@ func stdcall7(fn stdFunction, a0, a1, a2, a3, a4, a5, a6 uintptr) uintptr {
 	return stdcall(fn)
 }
 
-// in sys_windows_386.s and sys_windows_amd64.s
-func onosstack(fn unsafe.Pointer, arg uint32)
-func usleep2(usec uint32)
+// These must run on the system stack only.
+func usleep2(dt int32)
+func usleep2HighRes(dt int32)
 func switchtothread()
 
-var usleep2Addr unsafe.Pointer
-var switchtothreadAddr unsafe.Pointer
+//go:nosplit
+func osyield_no_g() {
+	switchtothread()
+}
 
 //go:nosplit
 func osyield() {
-	onosstack(switchtothreadAddr, 0)
+	systemstack(switchtothread)
+}
+
+//go:nosplit
+func usleep_no_g(us uint32) {
+	dt := -10 * int32(us) // relative sleep (negative), 100ns units
+	usleep2(dt)
 }
 
 //go:nosplit
 func usleep(us uint32) {
-	// Have 1us units; want 100ns units.
-	onosstack(usleep2Addr, 10*us)
+	systemstack(func() {
+		dt := -10 * int32(us) // relative sleep (negative), 100ns units
+		// If the high-res timer is available and its handle has been allocated for this m, use it.
+		// Otherwise fall back to the low-res one, which doesn't need a handle.
+		if haveHighResTimer && getg().m.highResTimer != 0 {
+			usleep2HighRes(dt)
+		} else {
+			usleep2(dt)
+		}
+	})
 }
 
 func ctrlhandler1(_type uint32) uint32 {
@@ -1008,6 +1112,11 @@ func ctrlhandler1(_type uint32) uint32 {
 	}
 
 	if sigsend(s) {
+		if s == _SIGTERM {
+			// Windows terminates the process after this handler returns.
+			// Block indefinitely to give signal handlers a chance to clean up.
+			stdcall1(_Sleep, uintptr(_INFINITE))
+		}
 		return 1
 	}
 	return 0
@@ -1030,21 +1139,21 @@ func profilem(mp *m, thread uintptr) {
 	c.contextflags = _CONTEXT_CONTROL
 	stdcall2(_GetThreadContext, thread, uintptr(unsafe.Pointer(c)))
 
-	gp := gFromTLS(mp)
+	gp := gFromSP(mp, c.sp())
 
 	sigprof(c.ip(), c.sp(), c.lr(), gp, mp)
 }
 
-func gFromTLS(mp *m) *g {
-	switch GOARCH {
-	case "arm":
-		tls := &mp.tls[0]
-		return **((***g)(unsafe.Pointer(tls)))
-	case "386", "amd64":
-		tls := &mp.tls[0]
-		return *((**g)(unsafe.Pointer(tls)))
+func gFromSP(mp *m, sp uintptr) *g {
+	if gp := mp.g0; gp != nil && gp.stack.lo < sp && sp < gp.stack.hi {
+		return gp
 	}
-	throw("unsupported architecture")
+	if gp := mp.gsignal; gp != nil && gp.stack.lo < sp && sp < gp.stack.hi {
+		return gp
+	}
+	if gp := mp.curg; gp != nil && gp.stack.lo < sp && sp < gp.stack.hi {
+		return gp
+	}
 	return nil
 }
 
@@ -1065,8 +1174,12 @@ func profileloop1(param uintptr) uint32 {
 			}
 			// Acquire our own handle to the thread.
 			var thread uintptr
-			stdcall7(_DuplicateHandle, currentProcess, mp.thread, currentProcess, uintptr(unsafe.Pointer(&thread)), 0, 0, _DUPLICATE_SAME_ACCESS)
+			if stdcall7(_DuplicateHandle, currentProcess, mp.thread, currentProcess, uintptr(unsafe.Pointer(&thread)), 0, 0, _DUPLICATE_SAME_ACCESS) == 0 {
+				print("runtime.profileloop1: duplicatehandle failed; errno=", getlasterror(), "\n")
+				throw("runtime.profileloop1: duplicatehandle failed")
+			}
 			unlock(&mp.threadLock)
+
 			// mp may exit between the DuplicateHandle
 			// above and the SuspendThread. The handle
 			// will remain valid, but SuspendThread may
@@ -1111,14 +1224,14 @@ func setThreadCPUProfiler(hz int32) {
 	atomic.Store((*uint32)(unsafe.Pointer(&getg().m.profilehz)), uint32(hz))
 }
 
-const preemptMSupported = GOARCH != "arm"
+const preemptMSupported = GOARCH == "386" || GOARCH == "amd64"
 
 // suspendLock protects simultaneous SuspendThread operations from
 // suspending each other.
 var suspendLock mutex
 
 func preemptM(mp *m) {
-	if GOARCH == "arm" {
+	if !preemptMSupported {
 		// TODO: Implement call injection
 		return
 	}
@@ -1145,7 +1258,10 @@ func preemptM(mp *m) {
 		return
 	}
 	var thread uintptr
-	stdcall7(_DuplicateHandle, currentProcess, mp.thread, currentProcess, uintptr(unsafe.Pointer(&thread)), 0, 0, _DUPLICATE_SAME_ACCESS)
+	if stdcall7(_DuplicateHandle, currentProcess, mp.thread, currentProcess, uintptr(unsafe.Pointer(&thread)), 0, 0, _DUPLICATE_SAME_ACCESS) == 0 {
+		print("runtime.preemptM: duplicatehandle failed; errno=", getlasterror(), "\n")
+		throw("runtime.preemptM: duplicatehandle failed")
+	}
 	unlock(&mp.threadLock)
 
 	// Prepare thread context buffer. This must be aligned to 16 bytes.
@@ -1186,7 +1302,7 @@ func preemptM(mp *m) {
 	unlock(&suspendLock)
 
 	// Does it want a preemption and is it safe to preempt?
-	gp := gFromTLS(mp)
+	gp := gFromSP(mp, c.sp())
 	if wantAsyncPreempt(gp) {
 		if ok, newpc := isAsyncSafePoint(gp, c.ip(), c.sp(), c.lr()); ok {
 			// Inject call to asyncPreempt

@@ -19,6 +19,8 @@ var passFlagToTest = map[string]bool{
 	"cpu":                  true,
 	"cpuprofile":           true,
 	"failfast":             true,
+	"fuzz":                 true,
+	"fuzztime":             true,
 	"list":                 true,
 	"memprofile":           true,
 	"memprofilerate":       true,

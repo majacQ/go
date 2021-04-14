@@ -9,12 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"runtime"
 
 	"cmd/go/internal/base"
-	"cmd/go/internal/cfg"
 	"cmd/go/internal/modfetch"
 	"cmd/go/internal/modload"
 
@@ -32,6 +31,8 @@ modified since being downloaded. If all the modules are unmodified,
 verify prints "all modules verified." Otherwise it reports which
 modules have been changed and causes 'go mod' to exit with a
 non-zero status.
+
+See https://golang.org/ref/mod#go-mod-verify for more about 'go mod verify'.
 	`,
 	Run: runVerify,
 }
@@ -45,14 +46,8 @@ func runVerify(ctx context.Context, cmd *base.Command, args []string) {
 		// NOTE(rsc): Could take a module pattern.
 		base.Fatalf("go mod verify: verify takes no arguments")
 	}
-	// Checks go mod expected behavior
-	if !modload.Enabled() || !modload.HasModRoot() {
-		if cfg.Getenv("GO111MODULE") == "off" {
-			base.Fatalf("go: modules disabled by GO111MODULE=off; see 'go help modules'")
-		} else {
-			base.Fatalf("go: cannot find main module; see 'go help modules'")
-		}
-	}
+	modload.ForceUseModules = true
+	modload.RootMode = modload.NeedRoot
 
 	// Only verify up to GOMAXPROCS zips at once.
 	type token struct{}
@@ -93,10 +88,10 @@ func verifyMod(mod module.Version) []error {
 		_, zipErr = os.Stat(zip)
 	}
 	dir, dirErr := modfetch.DownloadDir(mod)
-	data, err := ioutil.ReadFile(zip + "hash")
+	data, err := os.ReadFile(zip + "hash")
 	if err != nil {
-		if zipErr != nil && errors.Is(zipErr, os.ErrNotExist) &&
-			dirErr != nil && errors.Is(dirErr, os.ErrNotExist) {
+		if zipErr != nil && errors.Is(zipErr, fs.ErrNotExist) &&
+			dirErr != nil && errors.Is(dirErr, fs.ErrNotExist) {
 			// Nothing downloaded yet. Nothing to verify.
 			return nil
 		}
@@ -105,7 +100,7 @@ func verifyMod(mod module.Version) []error {
 	}
 	h := string(bytes.TrimSpace(data))
 
-	if zipErr != nil && errors.Is(zipErr, os.ErrNotExist) {
+	if zipErr != nil && errors.Is(zipErr, fs.ErrNotExist) {
 		// ok
 	} else {
 		hZ, err := dirhash.HashZip(zip, dirhash.DefaultHash)
@@ -116,7 +111,7 @@ func verifyMod(mod module.Version) []error {
 			errs = append(errs, fmt.Errorf("%s %s: zip has been modified (%v)", mod.Path, mod.Version, zip))
 		}
 	}
-	if dirErr != nil && errors.Is(dirErr, os.ErrNotExist) {
+	if dirErr != nil && errors.Is(dirErr, fs.ErrNotExist) {
 		// ok
 	} else {
 		hD, err := dirhash.HashDir(dir, mod.Path+"@"+mod.Version, dirhash.DefaultHash)

@@ -6,7 +6,10 @@
 
 package types
 
-import "go/constant"
+import (
+	"go/constant"
+	"unicode"
+)
 
 // Conversion type-checks the conversion T(x).
 // The result is in x.
@@ -21,14 +24,11 @@ func (check *Checker) conversion(x *operand, T Type) {
 		case representableConst(x.val, check, t, &x.val):
 			ok = true
 		case isInteger(x.typ) && isString(t):
-			codepoint := int64(-1)
-			if i, ok := constant.Int64Val(x.val); ok {
-				codepoint = i
+			codepoint := unicode.ReplacementChar
+			if i, ok := constant.Uint64Val(x.val); ok && i <= unicode.MaxRune {
+				codepoint = rune(i)
 			}
-			// If codepoint < 0 the absolute value is too large (or unknown) for
-			// conversion. This is the same as converting any other out-of-range
-			// value - let string(codepoint) do the work.
-			x.val = constant.MakeString(string(rune(codepoint)))
+			x.val = constant.MakeString(string(codepoint))
 			ok = true
 		}
 	case x.convertibleTo(check, T):
@@ -38,7 +38,7 @@ func (check *Checker) conversion(x *operand, T Type) {
 	}
 
 	if !ok {
-		check.errorf(x.pos(), "cannot convert %s to %s", x, T)
+		check.errorf(x, _InvalidConversion, "cannot convert %s to %s", x, T)
 		x.mode = invalid
 		return
 	}
@@ -55,8 +55,8 @@ func (check *Checker) conversion(x *operand, T Type) {
 		// - Keep untyped nil for untyped nil arguments.
 		// - For integer to string conversions, keep the argument type.
 		//   (See also the TODO below.)
-		if IsInterface(T) || constArg && !isConstType(T) {
-			final = Default(x.typ)
+		if IsInterface(T) || constArg && !isConstType(T) || x.isNil() {
+			final = Default(x.typ) // default type of untyped nil is untyped nil
 		} else if isInteger(x.typ) && isString(T) {
 			final = x.typ
 		}
@@ -81,7 +81,7 @@ func (check *Checker) conversion(x *operand, T Type) {
 // exported API call, i.e., when all methods have been type-checked.
 func (x *operand) convertibleTo(check *Checker, T Type) bool {
 	// "x is assignable to T"
-	if x.assignableTo(check, T, nil) {
+	if ok, _ := x.assignableTo(check, T, nil); ok {
 		return true
 	}
 

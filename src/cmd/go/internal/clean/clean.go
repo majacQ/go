@@ -8,7 +8,7 @@ package clean
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -75,6 +75,8 @@ The -modcache flag causes clean to remove the entire module
 download cache, including unpacked source code of versioned
 dependencies.
 
+The -fuzzcache flag causes clean to remove values used for fuzz testing.
+
 For more about build flags, see 'go help build'.
 
 For more about specifying packages, see 'go help packages'.
@@ -85,6 +87,7 @@ var (
 	cleanI         bool // clean -i flag
 	cleanR         bool // clean -r flag
 	cleanCache     bool // clean -cache flag
+	cleanFuzzcache bool // clean -fuzzcache flag
 	cleanModcache  bool // clean -modcache flag
 	cleanTestcache bool // clean -testcache flag
 )
@@ -96,6 +99,7 @@ func init() {
 	CmdClean.Flag.BoolVar(&cleanI, "i", false, "")
 	CmdClean.Flag.BoolVar(&cleanR, "r", false, "")
 	CmdClean.Flag.BoolVar(&cleanCache, "cache", false, "")
+	CmdClean.Flag.BoolVar(&cleanFuzzcache, "fuzzcache", false, "")
 	CmdClean.Flag.BoolVar(&cleanModcache, "modcache", false, "")
 	CmdClean.Flag.BoolVar(&cleanTestcache, "testcache", false, "")
 
@@ -172,7 +176,7 @@ func runClean(ctx context.Context, cmd *base.Command, args []string) {
 			f, err := lockedfile.Edit(filepath.Join(dir, "testexpire.txt"))
 			if err == nil {
 				now := time.Now().UnixNano()
-				buf, _ := ioutil.ReadAll(f)
+				buf, _ := io.ReadAll(f)
 				prev, _ := strconv.ParseInt(strings.TrimSpace(string(buf)), 10, 64)
 				if now > prev {
 					if err = f.Truncate(0); err == nil {
@@ -203,6 +207,18 @@ func runClean(ctx context.Context, cmd *base.Command, args []string) {
 		if !cfg.BuildN {
 			if err := modfetch.RemoveAll(cfg.GOMODCACHE); err != nil {
 				base.Errorf("go clean -modcache: %v", err)
+			}
+		}
+	}
+
+	if cleanFuzzcache {
+		fuzzDir := cache.Default().FuzzDir()
+		if cfg.BuildN || cfg.BuildX {
+			b.Showcmd("", "rm -rf %s", fuzzDir)
+		}
+		if !cfg.BuildN {
+			if err := os.RemoveAll(fuzzDir); err != nil {
+				base.Errorf("go clean -fuzzcache: %v", err)
 			}
 		}
 	}
@@ -243,7 +259,7 @@ func clean(p *load.Package) {
 		base.Errorf("%v", p.Error)
 		return
 	}
-	dirs, err := ioutil.ReadDir(p.Dir)
+	dirs, err := os.ReadDir(p.Dir)
 	if err != nil {
 		base.Errorf("go clean %s: %v", p.Dir, err)
 		return
@@ -275,6 +291,8 @@ func clean(p *load.Package) {
 		allRemove = append(allRemove,
 			elem,
 			elem+".exe",
+			p.DefaultExecName(),
+			p.DefaultExecName()+".exe",
 		)
 	}
 
@@ -282,16 +300,28 @@ func clean(p *load.Package) {
 	allRemove = append(allRemove,
 		elem+".test",
 		elem+".test.exe",
+		p.DefaultExecName()+".test",
+		p.DefaultExecName()+".test.exe",
 	)
 
-	// Remove a potential executable for each .go file in the directory that
+	// Remove a potential executable, test executable for each .go file in the directory that
 	// is not part of the directory's package.
 	for _, dir := range dirs {
 		name := dir.Name()
 		if packageFile[name] {
 			continue
 		}
-		if !dir.IsDir() && strings.HasSuffix(name, ".go") {
+
+		if dir.IsDir() {
+			continue
+		}
+
+		if strings.HasSuffix(name, "_test.go") {
+			base := name[:len(name)-len("_test.go")]
+			allRemove = append(allRemove, base+".test", base+".test.exe")
+		}
+
+		if strings.HasSuffix(name, ".go") {
 			// TODO(adg,rsc): check that this .go file is actually
 			// in "package main", and therefore capable of building
 			// to an executable file.

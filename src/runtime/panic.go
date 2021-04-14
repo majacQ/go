@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"internal/abi"
 	"runtime/internal/atomic"
 	"runtime/internal/sys"
 	"unsafe"
@@ -212,6 +213,11 @@ func panicmem() {
 	panic(memoryError)
 }
 
+func panicmemAddr(addr uintptr) {
+	panicCheck2("invalid memory address or nil pointer dereference")
+	panic(errorAddressString{msg: "invalid memory address or nil pointer dereference", addr: addr})
+}
+
 // Create a new deferred function fn with siz bytes of arguments.
 // The compiler turns a defer statement into a call to this.
 //go:nosplit
@@ -416,15 +422,6 @@ func newdefer(siz int32) *_defer {
 			total := roundupsize(totaldefersize(uintptr(siz)))
 			d = (*_defer)(mallocgc(total, deferType, true))
 		})
-		if debugCachedWork {
-			// Duplicate the tail below so if there's a
-			// crash in checkPut we can tell if d was just
-			// allocated or came from the pool.
-			d.siz = siz
-			d.link = gp._defer
-			gp._defer = d
-			return d
-		}
 	}
 	d.siz = siz
 	d.heap = true
@@ -878,7 +875,13 @@ func reflectcallSave(p *_panic, fn, arg unsafe.Pointer, argsize uint32) {
 		p.pc = getcallerpc()
 		p.sp = unsafe.Pointer(getcallersp())
 	}
-	reflectcall(nil, fn, arg, argsize, argsize)
+	// Pass a dummy RegArgs for now since no function actually implements
+	// the register-based ABI.
+	//
+	// TODO(mknyszek): Implement this properly, setting up arguments in
+	// registers as necessary in the caller.
+	var regs abi.RegArgs
+	reflectcall(nil, fn, arg, argsize, argsize, argsize, &regs)
 	if p != nil {
 		p.pc = 0
 		p.sp = unsafe.Pointer(nil)
@@ -972,7 +975,9 @@ func gopanic(e interface{}) {
 			}
 		} else {
 			p.argp = unsafe.Pointer(getargp(0))
-			reflectcall(nil, unsafe.Pointer(d.fn), deferArgs(d), uint32(d.siz), uint32(d.siz))
+
+			var regs abi.RegArgs
+			reflectcall(nil, unsafe.Pointer(d.fn), deferArgs(d), uint32(d.siz), uint32(d.siz), uint32(d.siz), &regs)
 		}
 		p.argp = nil
 
@@ -1004,37 +1009,42 @@ func gopanic(e interface{}) {
 			}
 			atomic.Xadd(&runningPanicDefers, -1)
 
-			if done {
-				// Remove any remaining non-started, open-coded
-				// defer entries after a recover, since the
-				// corresponding defers will be executed normally
-				// (inline). Any such entry will become stale once
-				// we run the corresponding defers inline and exit
-				// the associated stack frame.
-				d := gp._defer
-				var prev *_defer
-				for d != nil {
-					if d.openDefer {
-						if d.started {
-							// This defer is started but we
-							// are in the middle of a
-							// defer-panic-recover inside of
-							// it, so don't remove it or any
-							// further defer entries
-							break
-						}
-						if prev == nil {
-							gp._defer = d.link
-						} else {
-							prev.link = d.link
-						}
-						newd := d.link
-						freedefer(d)
-						d = newd
+			// Remove any remaining non-started, open-coded
+			// defer entries after a recover, since the
+			// corresponding defers will be executed normally
+			// (inline). Any such entry will become stale once
+			// we run the corresponding defers inline and exit
+			// the associated stack frame.
+			d := gp._defer
+			var prev *_defer
+			if !done {
+				// Skip our current frame, if not done. It is
+				// needed to complete any remaining defers in
+				// deferreturn()
+				prev = d
+				d = d.link
+			}
+			for d != nil {
+				if d.started {
+					// This defer is started but we
+					// are in the middle of a
+					// defer-panic-recover inside of
+					// it, so don't remove it or any
+					// further defer entries
+					break
+				}
+				if d.openDefer {
+					if prev == nil {
+						gp._defer = d.link
 					} else {
-						prev = d
-						d = d.link
+						prev.link = d.link
 					}
+					newd := d.link
+					freedefer(d)
+					d = newd
+				} else {
+					prev = d
+					d = d.link
 				}
 			}
 

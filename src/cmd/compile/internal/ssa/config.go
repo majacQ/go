@@ -5,6 +5,8 @@
 package ssa
 
 import (
+	"cmd/compile/internal/base"
+	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
@@ -38,7 +40,6 @@ type Config struct {
 	useSSE         bool          // Use SSE for non-float operations
 	useAvg         bool          // Use optimizations that need Avg* operations
 	useHmul        bool          // Use optimizations that need Hmul* operations
-	use387         bool          // GO386=387
 	SoftFloat      bool          //
 	Race           bool          // race detector enabled
 	NeedsFpScratch bool          // No direct move between GP and FP register sets
@@ -139,7 +140,7 @@ type Frontend interface {
 
 	// Auto returns a Node for an auto variable of the given type.
 	// The SSA compiler uses this function to allocate space for spills.
-	Auto(src.XPos, *types.Type) GCNode
+	Auto(src.XPos, *types.Type) *ir.Name
 
 	// Given the name for a compound type, returns the name we should use
 	// for the parts of that compound type.
@@ -150,6 +151,7 @@ type Frontend interface {
 	SplitStruct(LocalSlot, int) LocalSlot
 	SplitArray(LocalSlot) LocalSlot              // array must be length 1
 	SplitInt64(LocalSlot) (LocalSlot, LocalSlot) // returns (hi, lo)
+	SplitSlot(parent *LocalSlot, suffix string, offset int64, t *types.Type) LocalSlot
 
 	// DerefItab dereferences an itab function
 	// entry, given the symbol of the itab and
@@ -178,24 +180,6 @@ type Frontend interface {
 	MyImportPath() string
 }
 
-// interface used to hold a *gc.Node (a stack variable).
-// We'd use *gc.Node directly but that would lead to an import cycle.
-type GCNode interface {
-	Typ() *types.Type
-	String() string
-	IsSynthetic() bool
-	IsAutoTmp() bool
-	StorageClass() StorageClass
-}
-
-type StorageClass uint8
-
-const (
-	ClassAuto     StorageClass = iota // local stack variable
-	ClassParam                        // argument
-	ClassParamOut                     // return value
-)
-
 // NewConfig returns a new configuration object for the given architecture.
 func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config {
 	c := &Config{arch: arch, Types: types}
@@ -211,9 +195,10 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 		c.registers = registersAMD64[:]
 		c.gpRegMask = gpRegMaskAMD64
 		c.fpRegMask = fpRegMaskAMD64
+		c.specialRegMask = specialRegMaskAMD64
 		c.FPReg = framepointerRegAMD64
 		c.LinkReg = linkRegAMD64
-		c.hasGReg = false
+		c.hasGReg = base.Flag.ABIWrap
 	case "386":
 		c.PtrSize = 4
 		c.RegSize = 4
@@ -248,7 +233,7 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 		c.FPReg = framepointerRegARM64
 		c.LinkReg = linkRegARM64
 		c.hasGReg = true
-		c.noDuffDevice = objabi.GOOS == "darwin" // darwin linker cannot handle BR26 reloc with non-zero addend
+		c.noDuffDevice = objabi.GOOS == "darwin" || objabi.GOOS == "ios" // darwin linker cannot handle BR26 reloc with non-zero addend
 	case "ppc64":
 		c.BigEndian = true
 		fallthrough
@@ -377,11 +362,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 	}
 
 	return c
-}
-
-func (c *Config) Set387(b bool) {
-	c.NeedsFpScratch = b
-	c.use387 = b
 }
 
 func (c *Config) Ctxt() *obj.Link { return c.ctxt }
