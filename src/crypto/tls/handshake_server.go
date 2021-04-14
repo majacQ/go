@@ -317,7 +317,8 @@ func (hs *serverHandshakeState) pickCipherSuite() error {
 
 		// If we don't have hardware support for AES-GCM, prefer other AEAD
 		// ciphers even if the client prioritized AES-GCM.
-		if !hasAESGCMHardwareSupport {
+		// If BoringCrypto is enabled, always prioritize AES-GCM.
+		if !hasAESGCMHardwareSupport && !boringEnabled {
 			preferenceList = deprioritizeAES(preferenceList)
 		}
 	}
@@ -519,7 +520,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 		}
 		if c.vers >= VersionTLS12 {
 			certReq.hasSignatureAlgorithm = true
-			certReq.supportedSignatureAlgorithms = supportedSignatureAlgorithms
+			certReq.supportedSignatureAlgorithms = supportedSignatureAlgorithms()
 		}
 
 		// An empty list of certificateAuthorities signals to
@@ -790,6 +791,8 @@ func (c *Conn) processCertsFromClient(certificate Certificate) error {
 
 	if c.config.ClientAuth >= VerifyClientCertIfGiven && len(certs) > 0 {
 		opts := x509.VerifyOptions{
+			IsBoring: isBoringCertificate,
+
 			Roots:         c.config.ClientCAs,
 			CurrentTime:   c.config.time(),
 			Intermediates: x509.NewCertPool(),
